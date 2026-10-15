@@ -1,0 +1,41 @@
+{:paths ["src" "resources" "test"]
+ :tasks
+ {:requires ([babashka.fs :as fs])
+
+  trace:gui {:doc "Browse a trace repo: bb trace:gui [repo] [port]  (central repo on :7360)"
+             :requires ([trace.gui])
+             :task (apply trace.gui/-main *command-line-args*)}
+
+  trace:raw {:doc "Trace as text: bb trace:raw [project] [NN] [-v]"
+             :requires ([trace.raw])
+             :task (apply trace.raw/-main *command-line-args*)}
+
+  trace:on {:doc "Record every Claude session into var/traces (global hook)"
+            :requires ([trace.install])
+            :task (trace.install/on (str (fs/canonicalize (System/getProperty "babashka.config"))))}
+
+  trace:off {:doc "Remove the global trace hook (the traces are kept)"
+             :requires ([trace.install])
+             :task (trace.install/off)}
+
+  trace:test {:doc "Test the trace recorder"
+              :requires ([clojure.test :as t] [trace.record-test])
+              :task (let [{:keys [fail error]} (t/run-tests 'trace.record-test)]
+                      (System/exit (if (zero? (+ fail error)) 0 1)))}
+
+  bench:round {:doc "Run the lame/sane bench: bb bench:round [from] [to]  (BENCH_RUN picks var/bench/<run>, default run2)"
+               :requires ([bench.round]) :task (apply bench.round/-main *command-line-args*)}
+  bench:extract {:doc "Transcripts -> <run>/analysis/<s>-calls.edn"
+                 :requires ([bench.extract]) :task (bench.extract/-main)}
+  bench:stats {:doc "Tool calls, errors and tokens per session, from the transcripts"
+               :requires ([bench.stats]) :task (bench.stats/-main)}
+  bench:analyze {:doc "Tool calls by category (needs bench:extract)"
+                 :requires ([bench.analyze]) :task (bench.analyze/-main)}
+  bench:peek {:doc "What the sessions evaluated (needs bench:extract)"
+              :requires ([bench.peek]) :task (bench.peek/-main)}
+  bench:gitstats {:doc "Commits by kind, most edited/read files, from the bench trace history"
+                  :requires ([bench.gitstats]) :task (bench.gitstats/-main)}
+  bench:parity {:doc "Same HTTP probes against both apps (:8081 sane, :8082 lame)"
+                :requires ([bench.parity]) :task (bench.parity/-main)}
+  bench:parity2 {:doc "Seeded paging/sort/search parity of both apps"
+                 :requires ([bench.parity2]) :task (bench.parity2/-main)}}}
