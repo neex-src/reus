@@ -101,6 +101,79 @@
     highlight(el);
   });
 
+  // shell commands: one command per line instead of one long line
+  $$('pre.cmd code.language-bash').forEach((c) => {
+    if (!window.shell) return;
+    c.dataset.raw = c.textContent;
+    try { c.textContent = shell.format(c.textContent); } catch (e) {}
+  });
+
+  // output per command (experimental): each command of a shell step with what it printed
+  const splitBox = document.getElementById('splitout');
+  function splitView(raw, output) {
+    const { segs, lines, parts } = shell.assign(raw, output);
+    const box = document.createElement('div');
+    sandbox.className = 'split';
+    const out = (from, to) => (to > from ? codeView(lines.slice(from, to).join('\n'), 'plaintext')
+                                         : Object.assign(document.createElement('div'), { className: 'sc-none', textContent: 'no output' }));
+    const cmd = (i) => { const pre = codeView(segs[i].cmd + (segs[i].op && segs[i].op !== ';' ? '  ' + segs[i].op : ''), 'bash'); pre.classList.add('sc-cmd'); return pre; };
+    for (const p of parts) {
+      const row = document.createElement('div');
+      if (p.owner != null) {
+        row.className = 'sc';
+        row.append(cmd(p.owner), out(p.from, p.to));
+      } else if (p.cmds.length) {
+        row.className = 'sc grp';
+        const h = document.createElement('div');
+        h.className = 'grp-h';
+        h.textContent = 'These ' + p.cmds.length + ' commands printed the lines below together; nothing in the output shows where one ends.';
+        row.append(h, ...p.cmds.map(cmd), out(p.from, p.to));
+      } else {
+        row.className = 'sc stray';
+        const h = document.createElement('div');
+        h.className = 'grp-h';
+        h.textContent = 'Output none of the commands was expected to print';
+        row.append(h, out(p.from, p.to));
+      }
+      sandbox.appendChild(row);
+    }
+    return box;
+  }
+  async function splitStep(body) {
+    if (!window.shell || body.dataset.split) return;
+    const code = body.querySelector(':scope > pre.cmd code.language-bash');
+    const outDet = body.querySelector(':scope > details.lazy[data-kind="text"]');
+    if (!code || !outDet || shell.split(code.dataset.raw || code.textContent).length < 2) return;
+    body.dataset.split = '1';
+    try {
+      const r = await fetch(outDet.dataset.src);
+      const text = stripAnsi(await r.text());
+      if (!r.ok) throw new Error(text || r.status);
+      const view = splitView(code.dataset.raw, text);
+      body.querySelector(':scope > pre.cmd').after(view);
+      body.classList.add('has-split');
+      highlight(view);
+    } catch (e) { delete body.dataset.split; }
+  }
+  function splitOpen() {
+    if (!splitBox || !splitBox.checked) return;
+    $$('details.step-d[open] > .step-body').forEach(splitStep);
+  }
+  if (splitBox) {
+    const q = new URLSearchParams(location.search).get('split');
+    splitBox.checked = q != null ? q === '1' : store.get('trace.split') === '1';
+    document.body.classList.toggle('split-on', splitBox.checked);
+    splitBox.addEventListener('change', () => {
+      store.set('trace.split', splitBox.checked ? '1' : '0');
+      document.body.classList.toggle('split-on', splitBox.checked);
+      splitOpen();
+    });
+    document.addEventListener('toggle', (ev) => {
+      if (splitBox.checked && ev.target.classList && ev.target.classList.contains('step-d') && ev.target.open)
+        splitStep(ev.target.querySelector(':scope > .step-body'));
+    }, true);
+  }
+
   // project picker
   $$('select[data-nav]').forEach((sel) => sel.addEventListener('change', () => { location.href = sel.value; }));
 
@@ -136,6 +209,7 @@
   }
   window.addEventListener('hashchange', openHash);
   openHash();
+  splitOpen();
 
   // keep the current prompt visible in the index
   const cur = document.querySelector('.pr.cur');

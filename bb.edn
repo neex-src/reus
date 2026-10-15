@@ -23,10 +23,11 @@
               :task (let [{:keys [fail error]} (t/run-tests 'trace.record-test)]
                       (System/exit (if (zero? (+ fail error)) 0 1)))}
 
-  test {:doc "Every test of this repo"
+  test {:doc "Every test of this repo (the shell.js one needs node)"
         :requires ([clojure.test :as t] [trace.record-test] [jsonl.read-test])
-        :task (let [{:keys [fail error]} (t/run-tests 'trace.record-test 'jsonl.read-test)]
-                (System/exit (if (zero? (+ fail error)) 0 1)))}
+        :task (let [{:keys [fail error]} (t/run-tests 'trace.record-test 'jsonl.read-test)
+                    js (:exit (shell {:continue true} "node test/trace/shell_test.js"))]
+                (System/exit (if (and (zero? (+ fail error)) (zero? js)) 0 1)))}
 
   jsonl:ls {:doc "Claude transcripts, one line each: bb jsonl:ls [sel] [--agents]  (sel: file, dir, session id, project)"
             :requires ([jsonl.stats]) :task (apply jsonl.stats/ls *command-line-args*)}
