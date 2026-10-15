@@ -23,16 +23,24 @@
               :task (let [{:keys [fail error]} (t/run-tests 'trace.record-test)]
                       (System/exit (if (zero? (+ fail error)) 0 1)))}
 
+  test {:doc "Every test of this repo"
+        :requires ([clojure.test :as t] [trace.record-test] [jsonl.read-test])
+        :task (let [{:keys [fail error]} (t/run-tests 'trace.record-test 'jsonl.read-test)]
+                (System/exit (if (zero? (+ fail error)) 0 1)))}
+
+  jsonl:ls {:doc "Claude transcripts, one line each: bb jsonl:ls [sel] [--agents]  (sel: file, dir, session id, project)"
+            :requires ([jsonl.stats]) :task (apply jsonl.stats/ls *command-line-args*)}
+  jsonl:stats {:doc "Per session: prompts, tool calls, failures, tokens; totals"
+               :requires ([jsonl.stats]) :task (apply jsonl.stats/stats *command-line-args*)}
+  jsonl:calls {:doc "Every tool call as edn, one per line"
+               :requires ([jsonl.stats]) :task (apply jsonl.stats/calls *command-line-args*)}
+  jsonl:analyze {:doc "Tool calls by category: count, failures, time, output size [--each]"
+                 :requires ([jsonl.analyze]) :task (apply jsonl.analyze/-main *command-line-args*)}
+  jsonl:peek {:doc "What the sessions evaluated in a REPL"
+              :requires ([jsonl.peek]) :task (apply jsonl.peek/-main *command-line-args*)}
+
   bench:round {:doc "Run the lame/sane bench: bb bench:round [from] [to]  (BENCH_RUN picks var/bench/<run>, default run2)"
                :requires ([bench.round]) :task (apply bench.round/-main *command-line-args*)}
-  bench:extract {:doc "Transcripts -> <run>/analysis/<s>-calls.edn"
-                 :requires ([bench.extract]) :task (bench.extract/-main)}
-  bench:stats {:doc "Tool calls, errors and tokens per session, from the transcripts"
-               :requires ([bench.stats]) :task (bench.stats/-main)}
-  bench:analyze {:doc "Tool calls by category (needs bench:extract)"
-                 :requires ([bench.analyze]) :task (bench.analyze/-main)}
-  bench:peek {:doc "What the sessions evaluated (needs bench:extract)"
-              :requires ([bench.peek]) :task (bench.peek/-main)}
   bench:gitstats {:doc "Commits by kind, most edited/read files, from the bench trace history"
                   :requires ([bench.gitstats]) :task (bench.gitstats/-main)}
   bench:parity {:doc "Same HTTP probes against both apps (:8081 sane, :8082 lame)"
