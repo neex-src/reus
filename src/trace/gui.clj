@@ -168,6 +168,7 @@
       [:script {:src "https://cdnjs.cloudflare.com/ajax/libs/dompurify/3.1.6/purify.min.js"}]]
      [:body {:data-watch (json/generate-string (or watch {}))}
       body
+      [:script {:src "/static/shell.js"}]
       [:script {:src "/static/app.js"}]]])))
 
 (defn- m-param [ms] (str "m=" (str/join "," (map enc ms))))
@@ -193,6 +194,8 @@
       [:a {:href (str "/files?m=" (enc m)) :class (when (= current m) "on")} (str "Files · " m)])]
    [:div.live
     [:span#livestate.state "watching"]
+    [:label {:title "Show each command of a shell step with the output it printed. A guess: shell output has no separators, so commands are told apart by echo markers and by the shape of their lines."}
+     [:input#splitout {:type "checkbox"}] " output per command (experimental)"]
     [:label [:input#follow {:type "checkbox"}] " follow live"]]])
 
 (defn- prompt-index [tips ms current]
@@ -365,7 +368,7 @@
         {:status 200 :headers {"content-type" "application/json"}
          :body (json/generate-string {:tips tips :live (sort (live-branches))})}
 
-        (#{"/static/app.css" "/static/app.js"} uri)
+        (#{"/static/app.css" "/static/app.js" "/static/shell.js"} uri)
         {:status 200
          :headers {"content-type" (if (str/ends-with? uri ".css") "text/css" "text/javascript") "cache-control" "no-store"}
          :body (slurp (io/resource (str "trace/" (fs/file-name uri))))}
