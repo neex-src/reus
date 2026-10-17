@@ -1,13 +1,13 @@
 (ns trace.replay
   "Old sessions into a trace repo: the hook payloads are rebuilt from the transcripts
-  and fed, in time order, to trace.record, which runs against a shadow of each project
-  as it was then (trace.shadow), with git dates set to the event times.
+  and fed, in time order, to trace.record, which runs against a batch store (trace.store: one git fast-import) and a
+  shadow of each project as it was then (trace.shadow), with git dates set to the event times.
 
     bb trace:replay <sel>... [--repo dir] [--map orig=dir]... [--force]
   sel as in jsonl:ls (several add up); every selected session, with its subagent runs, is one stream
   sorted by time, so prompt numbers follow reality across concurrent sessions. The repo
   (default var/replay; never the live one) is refused when it exists, unless --force
-  replaces it; the shadows are <repo>-wt.
+  replaces it.
 
   From a transcript:
     prompt          what the live hook was seen to get: a typed prompt (also one typed
@@ -35,8 +35,9 @@
             [jsonl.read :as jr]
             [trace.git :as g]
             [trace.record :as rec]
-            [trace.shadow :as shadow])
-  (:import [java.time Instant ZoneId]))
+            [trace.shadow :as shadow]
+            [trace.store :as store])
+  (:import [java.time Instant]))
 
 (def default-repo (str (fs/path (fs/parent g/default-repo) "replay")))
 
@@ -296,37 +297,35 @@
 
 ;; --- run ------------------------------------------------------------------------------
 
-(defn- git-date [ms]
-  (let [i (Instant/ofEpochMilli ms)
-        off (.getTotalSeconds (.getOffset (.getRules (ZoneId/systemDefault)) i))]
-    (format "%d %s%02d%02d" (quot ms 1000) (if (neg? off) "-" "+") (quot (abs off) 3600) (quot (mod (abs off) 3600) 60))))
-
 (defn- file-of [{:strs [tool_input]}] (some #(get tool_input %) ["file_path" "path" "notebook_path"]))
 
 (defn replay!
-  "Replay main transcripts files into repo; maps {orig-root repo-dir}. Returns stats."
+  "Replay main transcripts files into repo (a new one); maps {orig-root repo-dir}. Returns stats."
   [files repo maps]
   (let [evs (events files)
-        sh (shadow/create (str repo "-wt") maps)
+        sh (shadow/create maps)
+        store (store/batch repo)
+        x {:s store :d (shadow/disk sh repo)}
         st (atom {})]
-    (doseq [[wt branch] (distinct (worktree-adds evs))] (shadow/worktree! sh wt branch))
-    (binding [g/*repo* repo
-              rec/*local* #(shadow/local sh %)
-              rec/*orig* #(shadow/orig sh %)]
+    (try
+      (doseq [[wt branch] (distinct (worktree-adds evs))] (shadow/worktree! sh wt branch))
       (doseq [{:keys [kind ts start payload branch] :as ev} evs]
         (let [cwd (get payload "cwd")
               f (when (= kind :tool) (let [f (file-of payload)] (when (and f (fs/absolute? f)) f)))
               sync! (fn [t] (when f (shadow/sync! sh f t branch))
-                      (when cwd (shadow/sync! sh cwd t branch :dir? true)))]
+                      (when cwd (shadow/sync! sh cwd t branch)))]
           ;; a tool call's evidence applies to the disk as it was when the call started; a
           ;; commit the call made shows when the disk is then moved to the call's end
           (when (= kind :tool)
             (sync! (or start ts))
             (evidence! sh st ev))
           (when (and cwd (not (sync! ts))) (stat! st :no-repo))
-          (binding [g/*env* {"GIT_AUTHOR_DATE" (git-date ts) "GIT_COMMITTER_DATE" (git-date ts)}]
-            (rec/handle! (name kind) payload))
-          (stat! st kind))))
+          (store/at! store ts)
+          (rec/handle-in! x (name kind) payload)
+          (stat! st kind)))
+      (store/close! store)
+      (catch Throwable e (.destroy ^Process (:proc store)) (throw e))
+      (finally (shadow/close! sh)))
     (merge @st {:head (shadow/stats sh)})))
 
 (defn -main [& argv]
@@ -345,9 +344,9 @@
       (some #{repo} (map #(str (fs/absolutize %)) [g/default-repo g/*repo*]))
       (do (println "refusing to replay into the live trace repo" repo) (System/exit 1))
       (and (fs/exists? repo) (not force))
-      (do (println repo "exists; --force replaces it (and" (str repo "-wt") ")") (System/exit 1))
+      (do (println repo "exists; --force replaces it") (System/exit 1))
       :else
-      (do (when (fs/exists? repo) (fs/delete-tree repo) (fs/delete-tree (str repo "-wt")))
+      (do (when (fs/exists? repo) (fs/delete-tree repo))
           (println "replaying" (count files) "sessions into" repo)
           (doseq [f files] (println " " f))
           (let [s (replay! files repo maps)]
