@@ -30,7 +30,7 @@
 (defn- ms-between [a b]
   (try (.toMillis (Duration/between (Instant/parse a) (Instant/parse b))) (catch Exception _ nil)))
 
-(defn- find-file [session id suffix]
+(defn find-file [session id suffix]
   (first (fs/glob projects-dir (str "*/" session "/subagents/agent-" id suffix))))
 
 (defn- scan

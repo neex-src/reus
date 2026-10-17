@@ -73,3 +73,36 @@
     (is (nil? (rec/project-of g/*repo*)) "the trace repo itself: not traced")
     (ev "tool" {"session_id" "nobody" "cwd" "/tmp" "tool_name" "Bash" "tool_input" {"command" "ls"}})
     (is (= "" (git "for-each-ref" "refs/heads")) "a tool call without an open prompt records nothing")))
+
+(deftest subagent-is-its-own-history
+  (let [proj (fresh!)]
+    (binding [g/*repo* (str (fs/path scratch "traces3"))]
+      (ev "prompt" {"session_id" "s1" "cwd" proj "prompt" "do it"})
+      (ev "tool" {"session_id" "s1" "cwd" proj "tool_name" "Bash" "tool_input" {"command" "echo main-1"}
+                  "tool_response" {"stdout" "main-1"}})
+      (ev "subagent-start" {"session_id" "s1" "cwd" proj "agent_id" "ab12" "agent_type" "general-purpose"})
+      (ev "tool" {"session_id" "s1" "cwd" proj "agent_id" "ab12" "agent_type" "general-purpose"
+                  "tool_name" "Bash" "tool_input" {"command" "echo agent-1"} "tool_response" {"stdout" "agent-1"}})
+      (ev "tool" {"session_id" "s1" "cwd" proj "tool_name" "Bash" "tool_input" {"command" "echo main-2"}
+                  "tool_response" {"stdout" "main-2"}})
+      (ev "stop" {"session_id" "s1" "last_assistant_message" "parent done"})
+      (testing "the agent keeps recording after its parent stopped, on its own branch"
+        (ev "tool" {"session_id" "s1" "cwd" proj "agent_id" "ab12" "agent_type" "general-purpose"
+                    "tool_name" "Bash" "tool_input" {"command" "echo agent-2"} "tool_response" {"stdout" "agent-2"}})
+        (ev "subagent-stop" {"session_id" "s1" "agent_id" "ab12" "last_assistant_message" "agent done"}))
+      (let [tips (r/tips)
+            parent (r/prompt-data tips "proj" "00")
+            agent (r/prompt-data tips "proj" "00-aab12")]
+        (testing "the parent's prompt has only the parent's calls"
+          (is (= ["echo main-1" "echo main-2"] (map #(get-in % [:call :code]) (:steps parent)))))
+        (testing "the agent's branch has the agent's calls and its reply"
+          (is (= ["echo agent-1" "echo agent-2"] (map #(get-in % [:call :code]) (:steps agent))))
+          (is (= "agent done" (:reply agent))))
+        (testing "the agent branch is a side line: cut from the parent's tip at the start, not merged"
+          (is (= 1 (count (str/split-lines (git "rev-list" "--merges" "proj")))))
+          (is (not= (get tips "proj-p00") (get tips "proj-p00-aab12")))
+          (is (= ["00"] (r/prompt-nos tips "proj"))))
+        (testing "every event keeps its raw payload as a note"
+          (let [c (get tips "proj-p00-aab12")]
+            (is (str/includes? (git "notes" "--ref=event" "show" c) "agent done"))))
+        (is (empty? (r/live-branches)))))))

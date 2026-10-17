@@ -17,6 +17,8 @@
     {"UserPromptSubmit" (hook (cmd "prompt"))
      "PostToolUse" (hook (cmd "tool"))
      "PostToolUseFailure" (hook (cmd "tool"))
+     "SubagentStart" (hook (cmd "subagent-start"))
+     "SubagentStop" (hook (cmd "subagent-stop"))
      "Stop" (hook (cmd "stop"))
      "SessionEnd" (hook (cmd "stop"))}))
 

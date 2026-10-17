@@ -76,8 +76,8 @@
   (let [s (:subject r)
         real (remove #(or (str/starts-with? (:path %) "reads/") (= "doto.md" (:path %))) (:files r))]
     (cond
-      (re-find #"^prompt \d+:" s) :prompt
-      (re-matches #"response \d+" s) :response
+      (re-find #"^prompt [\w-]+:" s) :prompt
+      (re-matches #"response [\w-]+" s) :response
       (str/starts-with? s "baseline ") :baseline
       (seq real) :edit
       (re-matches #"[0-9a-f]{40}" s) :read
@@ -89,6 +89,8 @@
 (defn step [rel r]
   (let [base (classify r)
         [cmd err] (str/split (:body r) (re-pattern (java.util.regex.Pattern/quote delim)) 2)
+        agent (second (re-find #"\n\nagent (\S+)$" (str/trim-newline (str cmd))))
+        cmd (str/replace (str cmd) #"\n\nagent \S+$" "")
         call (when (#{:read :run :edit} base) (parse-call (rel cmd)))
         ;; a call on a file outside the traced tree changes nothing there: it is
         ;; recorded as a run, but its tool says what it was
@@ -104,6 +106,7 @@
     (merge (select-keys r [:sha :at :subject])
            {:kind kind
             :cmd (rel cmd)
+            :agent agent
             :call call
             :err err
             :result result

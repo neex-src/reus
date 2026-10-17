@@ -3,9 +3,11 @@
   trace repo (trace.git/*repo*), nothing squashed.
 
   Hook command:  bb --config <reus>/bb.edn -m trace.record <event>
-    prompt  UserPromptSubmit
-    tool    PostToolUse / PostToolUseFailure
-    stop    Stop, SessionEnd
+    prompt          UserPromptSubmit
+    tool            PostToolUse / PostToolUseFailure
+    stop            Stop, SessionEnd
+    subagent-start  SubagentStart
+    subagent-stop   SubagentStop
 
   Layout. The project is the session's repo (the main checkout's dir name, also for
   a worktree of it); outside git, the ~/projects/<name> it sits in; elsewhere nothing
@@ -27,6 +29,16 @@
     3. `response NN`, doto.md = the reply; then the merge into <project>.
   <rel> is relative to the session's checkout root; a file outside it is abs/<path>.
 
+  A subagent run is recorded like a session of its own: SubagentStart opens the branch
+  <project>-pNN-a<agent id>, cut from the tip of the parent's prompt NN at that moment
+  (its open prompt, else its last); its first commit is `prompt NN-a<id>: ...` with the
+  agent's brief; every tool event that carries an agent_id goes to that branch, never to
+  the parent's; SubagentStop adds `response NN-a<id>`. The branch is not merged: it is a
+  side line, also when the parent stopped long ago. SessionEnd closes agents still open.
+
+  Every event's hook stdin is kept verbatim as a git note (refs/notes/event) on the commit
+  it made, so nothing of the payload is dropped.
+
   Nothing is ever checked out: commits are built with a private index and
   commit-tree and moved with update-ref, under one mkdir lock, so concurrent
   sessions cannot disturb each other. The open prompt of a session is
@@ -36,7 +48,9 @@
             [babashka.process :as p]
             [cheshire.core :as json]
             [clojure.edn :as edn]
+            [clojure.java.io :as io]
             [clojure.string :as str]
+            [trace.agents :as agents]
             [trace.git :as g :refer [git]]))
 
 (def delim "--- error ---")
@@ -66,8 +80,8 @@
           ;; a lock this old is a crashed hook's; take it over
           (do (fs/delete-tree lock) (recur 0)))))))
 
-(defn- tip [branch]
-  (let [r (g/git* {} "rev-parse" "--verify" "-q" (str "refs/heads/" branch))]
+(defn- tip [ref]
+  (let [r (g/git* {} "rev-parse" "--verify" "-q" (if (str/starts-with? ref "refs/") ref (str "refs/heads/" ref)))]
     (when (zero? (:exit r)) (str/trim (:out r)))))
 
 (defn- blob! [content] (git "hash-object" "-w" "--stdin" {:in (str content)}))
@@ -84,6 +98,22 @@
            (concat (mapcat #(vector "-p" %) (remove nil? [parent merge-parent]))
                    ["-m" subject] (when-not (str/blank? body) ["-m" body])))))
 
+(def ^:dynamic *raw* "The hook stdin of the event being handled, as received." nil)
+
+(def notes-ref "refs/notes/event")
+
+(defn- note!
+  "Keep the event's raw payload as a note on commit sha (notes tree built like commit!)."
+  [sha]
+  (when *raw*
+    (let [env {:extra-env {"GIT_INDEX_FILE" (gitdir "trace-index")}}
+          parent (tip notes-ref)]
+      (if parent (git "read-tree" parent env) (git "read-tree" "--empty" env))
+      (git "update-index" "--add" "--cacheinfo" (str "100644," (blob! *raw*) "," sha) env)
+      (git "update-ref" notes-ref
+           (apply git "commit-tree" (git "write-tree" env)
+                  (concat (when parent ["-p" parent]) ["-m" "event"]))))))
+
 (defn- advance! [branch sha] (git "update-ref" (str "refs/heads/" branch) sha))
 (defn- has? [rev path] (zero? (:exit (g/git* {} "cat-file" "-e" (str rev ":" path)))))
 
@@ -94,6 +124,14 @@
 (defn- state! [sid m]
   (let [f (state-file sid)]
     (if m (do (fs/create-dirs (fs/parent f)) (spit f (pr-str m))) (fs/delete-if-exists f))))
+
+(defn- last-file [sid] (gitdir "trace-last" (str/replace (str sid) #"[^A-Za-z0-9._-]" "_")))
+(defn- last-prompt
+  "The session's most recent prompt {:project :branch :nn :root}, open or not."
+  [sid]
+  (let [f (last-file sid)] (when (fs/exists? f) (edn/read-string (slurp f)))))
+
+(defn- agent-key [agent-id] (str "agent-" agent-id))
 
 (defn project-of
   "{:project name :root dir} for a session cwd, or nil when it is not traced."
@@ -190,15 +228,17 @@
       ""))
 
 (defn- close!
-  "Reply to the session's open prompt and merge it into its project (--no-ff: the
-  merge's tree is the prompt's)."
-  [sid reply]
-  (when-let [{:keys [project branch nn subject]} (state sid)]
+  "Reply to the open prompt of key (a session id, or an agent's key) and merge it into
+  its project (--no-ff: the merge's tree is the prompt's). An agent's branch is not merged."
+  [key reply & [note?]]
+  (when-let [{:keys [project branch nn subject agent]} (state key)]
     (when-let [t (tip branch)]
       (let [r (commit! t {"doto.md" reply} (str "response " nn) "")]
         (advance! branch r)
-        (advance! project (git "commit-tree" (str r "^{tree}") "-p" (tip project) "-p" r "-m" subject))))
-    (state! sid nil)))
+        (when note? (note! r))
+        (when-not agent
+          (advance! project (git "commit-tree" (str r "^{tree}") "-p" (tip project) "-p" r "-m" subject)))))
+    (state! key nil)))
 
 (defn on-prompt [{:strs [session_id prompt cwd]}]
   (close! session_id "")
@@ -211,10 +251,15 @@
           c (commit! (tip project) {"doto.md" prompt} subject
                      (str "session " session_id "\ncwd " cwd "\nroot " root))]
       (advance! branch c)
+      (note! c)
+      (when-let [f (last-file session_id)]
+        (fs/create-dirs (fs/parent f))
+        (spit f (pr-str {:project project :branch branch :nn nn :root root})))
       (state! session_id {:project project :branch branch :nn nn :root root :k 0 :subject subject}))))
 
-(defn on-tool [{:strs [session_id tool_name tool_input hook_event_name] :as in}]
-  (when-let [{:keys [branch nn root k] :as st} (state session_id)]
+(defn on-tool [{:strs [session_id agent_id tool_name tool_input hook_event_name] :as in}]
+  (let [key (if agent_id (agent-key agent_id) session_id)]
+   (when-let [{:keys [branch nn root k] :as st} (state key)]
     (when-let [t (tip branch)]
       (let [k (inc k)
             tool (short-tool tool_name)
@@ -243,23 +288,71 @@
                 (commit! t {(format "reads/_cmd/%s.%d" nn k) (if bad? (str delim "\n" text) text)}
                          (format "%s.%d" nn k) (str cmd agent)))]
         (advance! branch c)
-        (state! session_id (assoc st :k k))))))
+        (note! c)
+        (state! key (assoc st :k k)))))))
 
-(defn on-stop [in] (close! (get in "session_id") (reply-of in)))
+;; --- subagents ----------------------------------------------------------------------
 
-(defn handle! [event input]
+(defn- agent-brief
+  "The brief a subagent was given: the first message of its transcript (written as it starts)."
+  [session-id agent-id]
+  (loop [n 0]
+    (if-let [f (agents/find-file session-id agent-id ".jsonl")]
+      (or (with-open [r (io/reader (str f))]
+            (some-> (first (line-seq r)) (json/parse-string true) :message :content
+                    (#(if (string? %) % (str/join "\n" (keep :text %))))))
+          "")
+      (if (< n 10) (do (Thread/sleep 100) (recur (inc n))) ""))))
+
+(defn on-subagent-start [{:strs [session_id agent_id agent_type cwd]}]
+  (when-let [{:keys [project branch nn root]} (or (state session_id) (last-prompt session_id))]
+    (when-let [t (and agent_id (tip branch))]
+      (let [anid (str nn "-a" agent_id)
+            ab (str project "-p" anid)
+            brief (agent-brief session_id agent_id)
+            subject (str "prompt " anid ": " (clip (str agent_type ": " (first-line brief 80)) 100))
+            c (commit! t {"doto.md" brief} subject
+                       (str "session " session_id "\ncwd " cwd "\nroot " root "\nagent " agent_type
+                            "\nagent_id " agent_id "\nparent " branch))]
+        (advance! ab c)
+        (note! c)
+        (state! (agent-key agent_id) {:project project :branch ab :nn anid :root root :k 0 :subject subject
+                                      :agent true :session session_id})))))
+
+(defn on-subagent-stop [{:strs [agent_id last_assistant_message]}]
+  (when agent_id (close! (agent-key agent_id) (or last_assistant_message "") true)))
+
+(defn- agent-states-of [session-id]
+  (let [d (gitdir "trace-sessions")]
+    (when (fs/exists? d)
+      (keep #(let [st (try (edn/read-string (slurp (str %))) (catch Exception _ nil))]
+               (when (and (:agent st) (= session-id (:session st))) (str/replace (str (fs/file-name %)) #"^agent-" "")))
+            (fs/list-dir d)))))
+
+(defn on-stop [{:strs [session_id hook_event_name] :as in}]
+  (close! session_id (reply-of in) true)
+  (when (= "SessionEnd" hook_event_name)
+    (doseq [a (agent-states-of session_id)] (close! (agent-key a) "" false))))
+
+(defn handle!
+  "Handle one hook event; raw is its stdin as received (default: the parsed input re-encoded)."
+  [event input & [raw]]
   (ensure-repo!)
-  (with-lock
-    #(case event
-       "prompt" (on-prompt input)
-       "tool" (on-tool input)
-       "stop" (on-stop input)
-       nil)))
+  (binding [*raw* (or raw (json/generate-string input))]
+    (with-lock
+      #(case event
+         "prompt" (on-prompt input)
+         "tool" (on-tool input)
+         "stop" (on-stop input)
+         "subagent-start" (on-subagent-start input)
+         "subagent-stop" (on-subagent-stop input)
+         nil))))
 
 (defn -main [& [event]]
-  (let [input (try (json/parse-string (slurp *in*)) (catch Exception _ {}))]
+  (let [raw (slurp *in*)
+        input (try (json/parse-string raw) (catch Exception _ {}))]
     (try
-      (handle! event input)
+      (handle! event input raw)
       (catch Throwable e
         (try (spit (gitdir "trace-errors.log")
                    (str (java.time.Instant/now) " " event " " (get input "session_id") " " (ex-message e) "\n")
