@@ -10,7 +10,7 @@
     subagent-stop   SubagentStop
 
   Refs. The project is the session's repo (the main checkout's dir name, also for a
-  worktree of it); outside git, the ~/projects/<name> it sits in; elsewhere nothing is traced.
+  worktree of it); outside git, the ~/projects/<name> ($TRACE_PROJECTS/<name>) it sits in; elsewhere nothing is traced.
     <project>/main                 the real main, commit for commit
     <project>/s/<session8>         one Claude session
     <project>/a/<session8>-<agent> one subagent run
