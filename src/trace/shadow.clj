@@ -29,6 +29,11 @@
   would refuse (a changed file differs between the two commits) it is `reset --hard`: the
   overlay of tracked files goes, files git does not track stay.
 
+  Trees. (disk sh repo) answers `snapshot` with the tree of a worktree as `git add -A` would
+  have it: its head commit's tree and, on top, what the transcript changed (the overlay) that
+  is tracked or not ignored (trace.ignore replaces `git check-ignore`, which needs a checkout).
+  The tree is a sha of the project's repo plus changes: the batch store takes it as is.
+
   Evidence. (write! sh orig-path content) / (delete! ...) put what the transcript proves
   into the overlay (trace.replay applies edits, bash edit diffs, full reads); a path
   outside every repo goes to an overlay of its own, which is read before today's disk."
@@ -36,6 +41,7 @@
             [babashka.process :as p]
             [clojure.string :as str]
             [trace.disk :as disk]
+            [trace.ignore :as ignore]
             [trace.store :as store])
   (:import [java.io BufferedInputStream BufferedOutputStream ByteArrayOutputStream InputStream OutputStream]))
 
@@ -63,6 +69,8 @@
          :roots {}      ; orig-root -> {:repo :common :project :known #{orig-wt} :branches {orig-wt branch}}
          :wts {}        ; orig-wt (a root too) -> {:root :head sha :overlay {orig-path content|:deleted}}
          :abs {}        ; orig-path outside every repo -> content
+         :now nil       ; epoch ms of the event being replayed
+         :trace {}      ; session -> {path content}: the CLAUDE.md files and memory files the transcript showed
          :cats {}       ; repo -> the cat-file processes
          :cache {}
          :stats {}}))
@@ -70,6 +78,8 @@
 (defn- stat! [sh k] (swap! sh update-in [:stats k] (fnil inc 0)))
 
 (defn stats [sh] (:stats @sh))
+
+(defn at! "The time of the event being replayed (epoch ms)." [sh ms] (swap! sh assoc :now ms) nil)
 
 ;; --- git objects of a repo ----------------------------------------------------------
 
@@ -185,6 +195,14 @@
                           (update :cache dissoc :owner))))
           orig-root))))
 
+(defn open!
+  "Open the root of the repo orig path p is in (so a replay knows its repos up front)."
+  [sh p] (open-root! sh p))
+
+(defn objects-dirs
+  "The object directories of the repos opened so far."
+  [sh] (vec (distinct (map #(str (fs/path (:common %) "objects")) (vals (:roots @sh))))))
+
 (defn worktree!
   "Note that orig dir wt was a git worktree (a `git worktree add` in a transcript), on
   branch (nil when unknown or detached)."
@@ -274,6 +292,9 @@
 (defn- branch-ref? [sh repo b]
   (cached sh [:branch-ref repo b] #(boolean (sh! repo "rev-parse" "-q" "--verify" (str "refs/heads/" b)))))
 
+(defn- default-of [sh repo]
+  (cached sh [:default repo] #(some (fn [b] (when (branch-ref? sh repo b) b)) ["main" "master"])))
+
 (defn- head-at
   "[sha source] of orig worktree wt (in root r) at ts."
   [sh r wt ts branch]
@@ -282,7 +303,7 @@
         admin (when-not (= r wt) (admin-dir sh common wt-repo))
         head-log (if (= r wt) (str (fs/path common "logs" "HEAD")) (some-> admin (fs/path "logs" "HEAD") str))
         branch (when-not (contains? #{nil "" "HEAD"} branch) branch)
-        default (cached sh [:default repo] #(some (fn [b] (when (branch-ref? sh repo b) b)) ["main" "master"]))]
+        default (default-of sh repo)]
     (or (some-> head-log (#(at (reflog sh %) ts)) second (vector :reflog))
         (some-> branch (#(at (reflog sh (str (fs/path common "logs" "refs" "heads" %))) ts)) second (vector :branch))
         (some-> branch (#(or (when (branch-ref? sh repo %) (str "refs/heads/" %))
@@ -357,6 +378,7 @@
   "Make the worktree holding orig path p be on its commit at ts (epoch ms). Returns the
   HEAD source, or nil when p is in no repo."
   [sh p ts branch & _]
+  (swap! sh assoc :now ts)
   (when-let [[r wt] (wt-of sh (norm p))]
     (let [[sha src] (head-at sh r wt ts (or (get-in @sh [:roots r :branches wt]) branch))]
       (when sha
@@ -378,6 +400,7 @@
 (defn write! [sh p content]
   (when (writable? sh p)
     (let [p (norm p)]
+      (when (str/ends-with? p "/.gitignore") (swap! sh update :cache dissoc :ignored))
       (if-let [[_ wt] (owner sh p)]
         (swap! sh assoc-in [:wts wt :overlay p] content)
         (swap! sh assoc-in [:abs p] content)))
@@ -386,6 +409,7 @@
 (defn delete! [sh p]
   (when (writable? sh p)
     (let [p (norm p)]
+      (when (str/ends-with? p "/.gitignore") (swap! sh update :cache dissoc :ignored))
       (if-let [[r wt] (owner sh p)]
         (let [{:keys [head]} (get-in @sh [:wts wt])
               tracked? (and head (blob-at sh (get-in @sh [:roots r :repo]) head (rel-in wt p)))]
@@ -394,6 +418,64 @@
 
 ;; --- the Disk -------------------------------------------------------------------------
 
+(defn trace-path
+  "Where a file Claude Code reads its instructions or memory from goes in .claude-trace, or nil."
+  [p]
+  (let [p (str p) n (str (fs/file-name p))]
+    (cond (#{"CLAUDE.md" "CLAUDE.local.md"} n) (disk/claude-md-key p)
+          (re-find #"/\.claude/projects/[^/]+/memory/.+\.md$" p) (str "memory/" (second (re-find #"/memory/(.+)$" p)))
+          (re-find #"/\.claude/(rules|CLAUDE)" p) (when (str/ends-with? p ".md") (disk/claude-md-key p)))))
+
+(defn trace-file!
+  "The transcript showed (or wrote) a file Claude Code takes instructions or memory from."
+  [sh session p content]
+  (when-let [k (trace-path p)] (swap! sh assoc-in [:trace session k] content)))
+
+(defn- commit-tree-of [sh repo commit]
+  (cached sh [:commit-tree commit]
+          #(some-> (re-find #"^tree ([0-9a-f]+)" (String. ^bytes (blob-bytes sh repo commit) "UTF-8")) second)))
+
+(defn- ignore-env
+  "[base-rules dir-rules-fn] for worktree wt of root r at its head."
+  [sh r wt]
+  (let [{:keys [repo common]} (get-in @sh [:roots r])
+        read #(try (when (fs/regular-file? %) (slurp (str %))) (catch Exception _ nil))
+        base (cached sh [:ignore-base common]
+                     #(vec (keep (fn [f] (some-> (read f) ignore/parse))
+                                 [(fs/path (fs/home) ".config" "git" "ignore") (fs/path common "info" "exclude")])))
+        head (get-in @sh [:wts wt :head])]
+    [base (fn [d]
+            (let [f (str wt (when (seq d) (str "/" d)) "/.gitignore")
+                  {:keys [value blob]} (lookup sh f)]
+              (cond value (ignore/parse (if (bytes? value) (String. ^bytes value "UTF-8") value))
+                    blob (ignore/parse (String. ^bytes (blob-bytes sh repo blob) "UTF-8")))))]))
+
+(defn- ignored-in? [sh r wt rel]
+  (let [k [wt (get-in @sh [:wts wt :head]) rel]
+        c (get-in @sh [:cache :ignored])]
+    (if-let [[_ v] (find c k)]
+      v
+      (let [[base dir-rules] (ignore-env sh r wt)
+            v (ignore/ignored? base dir-rules rel)]
+        (swap! sh assoc-in [:cache :ignored] (assoc (if (> (count c) 20000) {} c) k v))
+        v))))
+
+(defn- snapshot
+  "The tree of worktree wt as `git add -A` would have it: its head commit's tree, with what
+  the transcript changed (the overlay) that is tracked or not ignored."
+  [sh wt]
+  (when-let [{:keys [root head overlay]} (get-in @sh [:wts wt])]
+    (let [repo (get-in @sh [:roots root :repo])]
+      (when head
+        {:base (commit-tree-of sh repo head)
+         :changes (into {} (keep (fn [[p v]]
+                                   (let [rel (rel-in wt p) tracked? (blob-at sh repo head rel)]
+                                     (cond (= v :deleted) [rel nil]
+                                           (or tracked? (not (ignored-in? sh root wt rel))) [rel v]))))
+                        overlay)}))))
+
+(defn- repo-for [sh root] (when-let [[r _] (owner sh (norm root))] (get-in @sh [:roots r :repo])))
+
 (defn disk
   "The trace.disk/Disk of shadow sh; repo is the trace repo being written."
   [sh repo]
@@ -401,7 +483,7 @@
     (reify disk/Disk
       (project-of [_ cwd]
         (if-let [[r wt] (and cwd (owner sh (norm cwd)))]
-          {:project (get-in @sh [:roots r :project]) :root wt}
+          {:project (get-in @sh [:roots r :project]) :root wt :common (get-in @sh [:roots r :common])}
           (disk/project-of real cwd)))
       (resolve-file [_ tok dirs]
         (try
@@ -417,4 +499,14 @@
           (let [repo (get-in @sh [:roots r :repo])]
             (if-let [b (and head (blob-at sh repo head rel))] (String. ^bytes (blob-bytes sh repo b) "UTF-8") ""))
           (disk/head-content real root rel)))
-      (external-text [_ f] (disk/external-text real f)))))
+      (external-text [_ f] (disk/external-text real f))
+      (snapshot [_ {:keys [root]}] (snapshot sh (norm root)))
+      (real-head [_ {:keys [root]}] (get-in @sh [:wts (norm root) :head]))
+      (main-tip [_ {:keys [root]}]
+        (when-let [r (repo-for sh root)]
+          (when-let [b (default-of sh r)]
+            (second (at (history sh r b) (or (:now @sh) Long/MAX_VALUE))))))
+      (commit-info [_ {:keys [root]} sha] (disk/real-info (repo-for sh root) sha))
+      (chain [_ {:keys [root]} from to] (disk/real-chain (repo-for sh root) from to))
+      (range-set [_ {:keys [root]} excl incl] (disk/real-range (repo-for sh root) excl incl))
+      (trace-files [_ session _ _] (get-in @sh [:trace session] {})))))

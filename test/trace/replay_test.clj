@@ -99,29 +99,31 @@
         stats (rp/replay! [f] repo {orig proj})]
     (binding [g/*repo* repo]
       (let [tips (r/tips)
-            p0 (r/prompt-data tips "proj" "00")
-            p1 (r/prompt-data tips "proj" "01")
-            ag (r/prompt-data tips "proj" "00-aag1")]
+            p0 (r/prompt-data tips "proj" "s1@00")
+            p1 (r/prompt-data tips "proj" "s1@01")
+            ag (r/prompt-data tips "proj" "s1-ag1@00-aag1")
+            show (fn [rev] (:out (g/git* {} "cat-file" "-p" rev)))]
         (is (= ["proj"] (r/mains tips)) "the project is named as the transcript spells it")
-        (is (= ["00" "01"] (r/prompt-nos tips "proj")))
+        (is (= ["s1@00" "s1-ag1@00-aag1" "s1@01"] (r/prompt-nos tips "proj")))
         (is (= "look at a" (:prompt p0)))
         (is (= "edited a" (:reply p0)))
-        (is (= [:read :edit :read :run] (map :kind (:steps p0))) "echo > b.txt names b.txt, which is there now")
+        (is (= [:read :edit :edit :run] (map :kind (:steps p0))) "echo > b.txt writes b.txt: an added file")
         (testing "the read is the file as it was at 11:00 (commit one)"
-          (is (= "v1\n" (:out (g/git* {} "cat-file" "-p" (:blob (first (:steps p0))))))))
+          (is (= "v1\n" (show (:blob (first (:steps p0)))))))
         (testing "the edit's diff is the edit"
-          (is (= [["files/a.clj" 1 1]] (map (juxt :path :add :del) (:files (second (:steps p0))))))
-          (is (= "v1\n" (:out (g/git* {} "show" (str (git "log" "-1" "--format=%H" "--grep=^baseline" "proj-p00") ":files/a.clj"))))
-              "baseline from originalFile"))
-        (testing "the bash edit diff reached the shadow: the next command reads b.txt as it holds"
-          (is (= "hello\n" (:out (g/git* {} "cat-file" "-p" (:blob (nth (:steps p0) 2)))))))
+          (is (= [["a.clj" 1 1]] (map (juxt :path :add :del) (:files (second (:steps p0)))))))
+        (testing "the bash edit diff reached the shadow, and so the tree"
+          (is (= [["b.txt" 1 0]] (map (juxt :path :add :del) (:files (nth (:steps p0) 2)))))
+          (is (= "hello" (git "show" (str (:sha (nth (:steps p0) 2)) ":b.txt")))))
         (testing "at 12:30 HEAD is commit two; the edit is in it"
-          (is (= "v1x\n" (:out (g/git* {} "cat-file" "-p" (:blob (first (:steps p1)))))))
+          (is (= "v1x\n" (show (:blob (first (:steps p1))))))
           (is (:err (second (:steps p1))) "the failure is marked"))
         (testing "the agent is its own branch"
           (is (= ["ls"] (map #(get-in % [:call :code]) (:steps ag))))
           (is (= "all fine" (:reply ag))))
         (testing "git dates are the transcript's"
-          (is (= "1767265200" (git "log" "-1" "--format=%at" "--grep=^prompt 00:" "proj-p00")) "prompt 00 at 11:00Z"))
+          (is (= "1767265200" (git "log" "-1" "--format=%at" "--grep=^prompt 00:" "proj/s/s1")) "prompt 00 at 11:00Z"))
+        (testing "trace main mirrors the project's main up to then: commit one at 11:00, commit two at 12:00"
+          (is (= ["two" "one"] (str/split-lines (git "log" "--first-parent" "--format=%s" "proj/main")))))
         (is (pos? (get-in stats [:head :reflog] 0)) "HEAD came from the project's reflog")
         (is (empty? (r/live-branches)))))))

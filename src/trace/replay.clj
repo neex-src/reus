@@ -25,6 +25,11 @@
   transcript adds to it (trace.turn), kept as the turn note, and file-history backups are
   evidence of a file's content when they were made.
 
+  The trace repo uses the object directories of the projects' repos found in the sessions'
+  cwds (alternates, set before fast-import starts); the CLAUDE.md files and memory files in
+  .claude-trace/ are what the transcripts proved (instructions, memory and file attachments,
+  edits to those files).
+
   Before record sees a tool event, the shadow is moved to the call's start and gets what
   the transcript proves, then to the call's end (a commit the call made): an
   Edit/MultiEdit/Write's resulting file (from originalFile and the input), a Bash call's
@@ -132,6 +137,22 @@
      (event :backup (ms backupTime) f n {}
             {:path (str realParentDir "/" (fs/file-name k)) :backup (str (fs/path *history-dir* sid backupFileName))}))))
 
+(defn- attached
+  "[path content] of the instruction, memory and file attachments recorded as a turn starts
+  (between the prompt at position i of es and the model's first reply): what the transcript
+  proves about the CLAUDE.md files and memory files in effect."
+  [es i]
+  (for [[_ e] (take-while #(not= "assistant" (get (second %) "type")) (subvec es (inc i) (min (count es) (+ i 400))))
+        :when (= "attachment" (get e "type"))
+        :let [a (get e "attachment")]
+        [path content] (case (get a "type")
+                         "instructions" (map (juxt #(get % "path") #(get % "content")) (get a "files"))
+                         "nested_memory" [[(or (get a "path") (get-in a ["file" "path"])) (or (get a "content") (get-in a ["file" "content"]))]]
+                         "file" [[(get a "filename") (get-in a ["content" "file" "content"])]]
+                         nil)
+        :when (and (string? path) (string? content))]
+    [path content]))
+
 (defn- session-events
   "Prompts, tool calls, stops and SessionEnd of a main transcript. A turn ends at its
   stop-hook summary (older transcripts without them: at an end_turn message); a prompt
@@ -159,7 +180,7 @@
                        (update :out conj (event :prompt ts f n
                                                 {"session_id" sid "cwd" (cwd-at i)
                                                  "hook_event_name" "UserPromptSubmit" "prompt" p}
-                                                {:branch (get e "gitBranch") :turn (turn/prompt ix i)}))
+                                                {:branch (get e "gitBranch") :turn (turn/prompt ix i) :trace-attach (attached es i)}))
                        (assoc :open {})
                        (cond-> task (update :seen conj task)))
 
@@ -302,6 +323,7 @@
   [sh st {:keys [payload result ts start] :as ev}]
   (when-not (= "PostToolUseFailure" (get payload "hook_event_name"))
     (when-let [[p c] (edited sh payload result)]
+      (when c (shadow/trace-file! sh (get payload "session_id") p c))
       (when (and c (shadow/write! sh p c)) (stat! st :edit)))
     (doseq [{:strs [filePath hunks]} (when (map? result) (get-in result ["bashEditDiff" "files"]))]
       (shadow/sync! sh filePath (or start ts) nil)
@@ -340,11 +362,12 @@
   [files repo maps]
   (let [evs (events files)
         sh (shadow/create maps)
-        store (store/batch repo)
+        _ (doseq [[wt branch] (distinct (worktree-adds evs))] (shadow/worktree! sh wt branch))
+        _ (doseq [cwd (distinct (keep #(get-in % [:payload "cwd"]) evs))] (shadow/open! sh cwd))
+        store (store/batch repo {:alternates (shadow/objects-dirs sh)})
         x {:s store :d (shadow/disk sh repo)}
         st (atom {})]
     (try
-      (doseq [[wt branch] (distinct (worktree-adds evs))] (shadow/worktree! sh wt branch))
       (doseq [{:keys [kind ts start payload branch] :as ev} evs
               :let [backup? (= kind :backup)]]
         (if backup?
@@ -360,6 +383,8 @@
             (evidence! sh st ev))
           (when (and cwd (not (sync! ts))) (stat! st :no-repo))
           (store/at! store ts)
+          (shadow/at! sh ts)
+          (doseq [[path content] (:trace-attach ev)] (shadow/trace-file! sh (get payload "session_id") path content))
           (rec/handle-in! (assoc x :turn (:turn ev)) (name kind) payload)
           (stat! st kind))))
       (store/close! store)
