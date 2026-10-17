@@ -248,3 +248,13 @@ body:not(.split-on) .split { display: none; }
 .ab.effort { color: var(--edit); }
 .ab.dur { color: var(--ink); }
 .agent { display: flex; flex-wrap: wrap; gap: 6px; align-items: baseline; }
+
+/* task notifications: background commands, monitors and agents ending */
+.events { margin: 12px 0; }
+.events ol { list-style: none; padding: 0; margin: 4px 0 0; }
+.note-ev { display: flex; flex-wrap: wrap; gap: 8px; align-items: baseline; padding: 3px 10px; border-left: 3px solid var(--line); font-size: 12.5px; }
+.note-ev.failed { border-color: var(--err); }
+.note-ev .t, .note-ev .st { font: 11.5px var(--mono); color: var(--muted); }
+.note-ev.failed .st { color: var(--err); }
+.note-ev .lbl { font: 12.5px var(--mono); flex: 1 1 20em; min-width: 0; overflow-wrap: anywhere; }
+.note-ev details { flex-basis: 100%; }
