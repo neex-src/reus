@@ -33,8 +33,11 @@
   <project>-pNN-a<agent id>, cut from the tip of the parent's prompt NN at that moment
   (its open prompt, else its last); its first commit is `prompt NN-a<id>: ...` with the
   agent's brief; every tool event that carries an agent_id goes to that branch, never to
-  the parent's; SubagentStop adds `response NN-a<id>`. The branch is not merged: it is a
-  side line, also when the parent stopped long ago. SessionEnd closes agents still open.
+  the parent's; SubagentStop adds `response NN-a<id>`. The branch stays a side line until
+  the parent reacts to the agent's notification: the project merge of that prompt then gets
+  the agent's tip as a further parent (the prompt open when the agent stops, else the prompt
+  opened by the `<task-notification>` naming the agent). An agent nobody reacted to stays a
+  dangling branch. SessionEnd closes agents still open.
 
   Every event's hook stdin is kept verbatim as a git note (refs/notes/event) on the commit
   it made, so nothing of the payload is dropped.
@@ -132,6 +135,14 @@
   (let [f (last-file sid)] (when (fs/exists? f) (edn/read-string (slurp f)))))
 
 (defn- agent-key [agent-id] (str "agent-" agent-id))
+
+(defn- pending-file [agent-id] (gitdir "trace-pending" (str/replace (str agent-id) #"[^A-Za-z0-9._-]" "_")))
+(defn- pending!
+  "A finished agent whose parent was idle: its tip waits for the prompt that reacts to its notification."
+  [agent-id m] (let [f (pending-file agent-id)] (fs/create-dirs (fs/parent f)) (spit f (pr-str m))))
+(defn- take-pending! [agent-id]
+  (let [f (pending-file agent-id)]
+    (when (fs/exists? f) (let [m (edn/read-string (slurp f))] (fs/delete f) (:tip m)))))
 
 (defn project-of
   "{:project name :root dir} for a session cwd, or nil when it is not traced."
@@ -231,13 +242,15 @@
   "Reply to the open prompt of key (a session id, or an agent's key) and merge it into
   its project (--no-ff: the merge's tree is the prompt's). An agent's branch is not merged."
   [key reply & [note?]]
-  (when-let [{:keys [project branch nn subject agent]} (state key)]
+  (when-let [{:keys [project branch nn subject agent merge]} (state key)]
     (when-let [t (tip branch)]
       (let [r (commit! t {"doto.md" reply} (str "response " nn) "")]
         (advance! branch r)
         (when note? (note! r))
         (when-not agent
-          (advance! project (git "commit-tree" (str r "^{tree}") "-p" (tip project) "-p" r "-m" subject)))))
+          ;; finished agents whose notification this prompt reacted to are merged with it
+          (advance! project (apply git "commit-tree" (str r "^{tree}") "-p" (tip project) "-p" r
+                                   (concat (mapcat #(vector "-p" %) merge) ["-m" subject]))))))
     (state! key nil)))
 
 (defn on-prompt [{:strs [session_id prompt cwd]}]
@@ -255,7 +268,8 @@
       (when-let [f (last-file session_id)]
         (fs/create-dirs (fs/parent f))
         (spit f (pr-str {:project project :branch branch :nn nn :root root})))
-      (state! session_id {:project project :branch branch :nn nn :root root :k 0 :subject subject}))))
+      (state! session_id {:project project :branch branch :nn nn :root root :k 0 :subject subject
+                          :merge (vec (keep take-pending! (map second (re-seq #"<task-id>([A-Za-z0-9]+)</task-id>" (str prompt)))))}))))
 
 (defn on-tool [{:strs [session_id agent_id tool_name tool_input hook_event_name] :as in}]
   (let [key (if agent_id (agent-key agent_id) session_id)]
@@ -319,8 +333,18 @@
         (state! (agent-key agent_id) {:project project :branch ab :nn anid :root root :k 0 :subject subject
                                       :agent true :session session_id})))))
 
-(defn on-subagent-stop [{:strs [agent_id last_assistant_message]}]
-  (when agent_id (close! (agent-key agent_id) (or last_assistant_message "") true)))
+(defn on-subagent-stop
+  "Close the agent's branch. Its tip is merged where the parent reacts to the agent's
+  notification: into the parent's prompt when one is open (the notification is delivered
+  into that turn), else into the prompt that is opened by the notification."
+  [{:strs [session_id agent_id last_assistant_message]}]
+  (when agent_id
+    (let [b (:branch (state (agent-key agent_id)))]
+      (close! (agent-key agent_id) (or last_assistant_message "") true)
+      (when-let [t (and b (tip b))]
+        (if-let [st (state session_id)]
+          (state! session_id (update st :merge (fnil conj []) t))
+          (pending! agent_id {:tip t :session session_id}))))))
 
 (defn- agent-states-of [session-id]
   (let [d (gitdir "trace-sessions")]
