@@ -24,7 +24,7 @@
 (def looks "Milliseconds after the hook fired at which the transcript is looked at." [0 100 500])
 (def windows "Bytes read from the end of the file: every look, then the last one again wider." [(* 256 1024) (* 8 1024 1024)])
 
-(defn- tail-lines
+(defn tail-lines
   "{:size n :lines [...]} the whole lines within the last `window` bytes of f."
   [f window]
   (with-open [r (RandomAccessFile. (str f) "r")]
@@ -55,6 +55,12 @@
     (first-hit lines id #(when (and (= "user" (get % "type"))
                                     (some (fn [b] (and (= "tool_result" (get b "type")) (= id (get b "tool_use_id")))) (blocks %)))
                            {}))))
+
+(defn- found-use
+  "The assistant entry that holds tool_use id."
+  [id lines]
+  (when-not (str/blank? id)
+    (first-hit lines id #(when (and (= "assistant" (get % "type")) (some (fn [b] (and (= "tool_use" (get b "type")) (= id (get b "id")))) (blocks %))) {}))))
 
 (defn- found-prompt [prompt lines]
   (let [need (subs (str/trim prompt) 0 (min 200 (count (str/trim prompt))))
@@ -120,7 +126,8 @@
             (cond-> {:event event :transcript (:file first-look) :bytes (:bytes first-look)
                      :found? (boolean match) :waited-ms (ms)}
               (:kind match) (assoc :kind (:kind match))
-              (= event "tool") (assoc :previous-found?
+              (= event "tool") (assoc :use-found? (boolean (:match (look (assoc pl :find (partial found-use (get in "tool_use_id"))) true)))
+                                      :previous-found?
                                       (when-not (str/blank? prev-id)
                                         (boolean (:match (look (plan event (assoc in "tool_use_id" prev-id)) true))))))
             :else (recur more first-look)))))
@@ -147,11 +154,14 @@
     (str (subs c 0 10) " session " (or (get ev "session_id") "?") " " (git "log" "-1" "--format=%cI" c))))
 
 (defn- previous-row [ps]
-  (let [ps (filter #(contains? % :previous-found?) ps)
-        known (remove (comp nil? :previous-found?) ps)]
-    (when (seq known)
-      (format "  previous tool call in the transcript at the next hook: %d of %d"
-              (count (filter :previous-found? known)) (count known)))))
+  (let [known (remove (comp nil? :previous-found?) (filter #(contains? % :previous-found?) ps))
+        uses (filter #(contains? % :use-found?) ps)]
+    (str (when (seq known)
+           (format "  previous tool call in the transcript at the next hook: %d of %d"
+                   (count (filter :previous-found? known)) (count known)))
+         (when (seq uses)
+           (format "\n  the assistant entry holding the tool_use at the hook: %d of %d"
+                   (count (filter :use-found? uses)) (count uses))))))
 
 (defn- row [kind ps]
   (let [ps (remove :error ps)
@@ -165,7 +175,7 @@
 (defn report [ps]
   (doseq [[kind group] (sort-by key (group-by :event ps))]
     (println (row kind group))
-    (when-let [l (and (= kind "tool") (previous-row group))] (println l))
+    (when-let [l (and (= kind "tool") (not (str/blank? (previous-row group))) (previous-row group))] (println l))
     (when-let [e (seq (filter :error group))] (println "   errors:" (count e) (pr-str (:error (first e))))))
   (let [never (filter #(false? (:found? %)) ps)]
     (when (seq never)

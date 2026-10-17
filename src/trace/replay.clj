@@ -21,7 +21,9 @@
                     end_turn message), with the turn's last text; a prompt that comes
                     while a turn runs does not end it; SessionEnd at the end of the file
     subagent-*      an agent file's first / last entry; its calls carry agent_id/agent_type
-  Each payload has `replay` {file line}, kept in its note.
+  Each payload has `replay` {file line}, kept in its note. An event also carries what the
+  transcript adds to it (trace.turn), kept as the turn note, and file-history backups are
+  evidence of a file's content when they were made.
 
   Before record sees a tool event, the shadow is moved to the call's start and gets what
   the transcript proves, then to the call's end (a commit the call made): an
@@ -36,7 +38,8 @@
             [trace.git :as g]
             [trace.record :as rec]
             [trace.shadow :as shadow]
-            [trace.store :as store])
+            [trace.store :as store]
+            [trace.turn :as turn])
   (:import [java.time Instant]))
 
 (def default-repo (str (fs/path (fs/parent g/default-repo) "replay")))
@@ -92,11 +95,14 @@
           :payload (assoc payload "replay" {"file" (str file) "line" line})}
          extra))
 
+(defn- distinct-by-key [evs] (vals (into (sorted-map) (map (juxt (juxt :path :backup) identity)) (reverse evs))))
+
 (defn- tool-events
   "Tool events of a transcript's entries; agent: {agent_id agent_type} or nil."
   [f es sid agent]
   (let [uses (into {} (for [[_ e] es b (blocks e) :when (= "tool_use" (get b "type"))]
-                        [(get b "id") (assoc b :start (ms (get e "timestamp")))]))]
+                        [(get b "id") (assoc b :start (ms (get e "timestamp")))]))
+        ix (turn/index (mapv second es))]
     (for [[n e] es :when (= "user" (get e "type"))
           b (blocks e) :when (= "tool_result" (get b "type"))
           :let [u (get uses (get b "tool_use_id"))] :when u]
@@ -110,7 +116,21 @@
                                "tool_response" (if (some? r) r (get b "content"))}
                               agent)
                  err? (assoc "error" (result-text (get b "content"))))
-               {:branch (get e "gitBranch") :result r :start (:start u)})))))
+               {:branch (get e "gitBranch") :result r :start (:start u)
+                :turn (turn/tool ix (get u "id") {})})))))
+
+(def ^:dynamic *history-dir* "Where Claude Code keeps file backups." (str (fs/path (fs/home) ".claude" "file-history")))
+
+(defn backup-events
+  "A file's content as Claude Code backed it up before an edit (file-history-snapshot entries,
+  backups under ~/.claude/file-history/<session>/): evidence of the file at backupTime."
+  [f es sid]
+  (distinct-by-key
+   (for [[n e] es :when (= "file-history-snapshot" (get e "type"))
+         [k {:strs [backupFileName backupTime realParentDir]}] (get-in e ["snapshot" "trackedFileBackups"])
+         :when (and backupFileName realParentDir (ms backupTime))]
+     (event :backup (ms backupTime) f n {}
+            {:path (str realParentDir "/" (fs/file-name k)) :backup (str (fs/path *history-dir* sid backupFileName))}))))
 
 (defn- session-events
   "Prompts, tool calls, stops and SessionEnd of a main transcript. A turn ends at its
@@ -121,10 +141,12 @@
         sid (or (some #(get (second %) "sessionId") es) (str (fs/strip-ext (fs/file-name f))))
         summaries? (some #(= "stop_hook_summary" (get (second %) "subtype")) es)
         cwd-at (fn [i] (or (some #(get (second %) "cwd") (rseq (subvec es 0 (inc i)))) (some #(get (second %) "cwd") es)))
-        stop (fn [st ts n]
+        ix (turn/index (mapv second es))
+        stop (fn [st ts n i]
                (-> st
                    (update :out conj (event :stop ts f n {"session_id" sid "hook_event_name" "Stop"
-                                                          "last_assistant_message" (or (get-in st [:open :text]) "")}))
+                                                          "last_assistant_message" (or (get-in st [:open :text]) "")}
+                                            {:turn (turn/stop ix (inc i))}))
                    (assoc :open nil)))
         step (fn [{:keys [open seen] :as st} [i [n e]]]
                (let [p (prompt-of e)
@@ -137,7 +159,7 @@
                        (update :out conj (event :prompt ts f n
                                                 {"session_id" sid "cwd" (cwd-at i)
                                                  "hook_event_name" "UserPromptSubmit" "prompt" p}
-                                                {:branch (get e "gitBranch")}))
+                                                {:branch (get e "gitBranch") :turn (turn/prompt ix i)}))
                        (assoc :open {})
                        (cond-> task (update :seen conj task)))
 
@@ -145,11 +167,11 @@
                    (let [t (texts e)
                          st (cond-> st (not (str/blank? t)) (assoc-in [:open :text] t))]
                      (if (and (not summaries?) (= "end_turn" (get-in e ["message" "stop_reason"])))
-                       (stop st ts n)
+                       (stop st ts n i)
                        st))
 
                    (and open (= "system" (get e "type")) (= "stop_hook_summary" (get e "subtype")))
-                   (stop st ts n)
+                   (stop st ts n i)
 
                    :else st)))
         {:keys [out]} (reduce step {:out [] :seen #{}} (map-indexed vector es))
@@ -161,7 +183,9 @@
             (when (seq es)
               [(event :stop last-ts f (first (peek es))
                       {"session_id" sid "hook_event_name" "SessionEnd" "reason" "replay"
-                       "last_assistant_message" (or last-text "")})])
+                       "last_assistant_message" (or last-text "")}
+                      {:turn (turn/stop ix)})])
+            (backup-events f es sid)
             (tool-events f es sid nil))))
 
 (defn- agent-events [session-file]
@@ -191,7 +215,7 @@
                               "last_assistant_message" (or last-text "")} a))]))))
        (sort (map str (fs/glob dir "agent-*.jsonl")))))))
 
-(def ^:private order {:prompt 0 :subagent-start 1 :tool 2 :subagent-stop 3 :stop 4})
+(def ^:private order {:backup -1 :prompt 0 :subagent-start 1 :tool 2 :subagent-stop 3 :stop 4})
 
 (defn events
   "Every event of the given main transcripts and their agents, in time order."
@@ -299,6 +323,18 @@
 
 (defn- file-of [{:strs [tool_input]}] (some #(get tool_input %) ["file_path" "path" "notebook_path"]))
 
+(defn- backup!
+  "Put a backed-up file into the shadow when it is not what the shadow has."
+  [sh st {:keys [ts path backup]}]
+  (when (fs/regular-file? backup)
+    (let [bs (fs/read-all-bytes backup) c (String. bs "UTF-8")]
+      (when (java.util.Arrays/equals ^bytes (.getBytes c "UTF-8") ^bytes bs) ; text only
+        (shadow/sync! sh path ts nil)
+        (stat! st :backup)
+        (when (not= c (shadow/content sh path))
+          (shadow/write! sh path c)
+          (stat! st :backup-applied))))))
+
 (defn replay!
   "Replay main transcripts files into repo (a new one); maps {orig-root repo-dir}. Returns stats."
   [files repo maps]
@@ -309,7 +345,10 @@
         st (atom {})]
     (try
       (doseq [[wt branch] (distinct (worktree-adds evs))] (shadow/worktree! sh wt branch))
-      (doseq [{:keys [kind ts start payload branch] :as ev} evs]
+      (doseq [{:keys [kind ts start payload branch] :as ev} evs
+              :let [backup? (= kind :backup)]]
+        (if backup?
+          (backup! sh st ev)
         (let [cwd (get payload "cwd")
               f (when (= kind :tool) (let [f (file-of payload)] (when (and f (fs/absolute? f)) f)))
               sync! (fn [t] (when f (shadow/sync! sh f t branch))
@@ -321,8 +360,8 @@
             (evidence! sh st ev))
           (when (and cwd (not (sync! ts))) (stat! st :no-repo))
           (store/at! store ts)
-          (rec/handle-in! x (name kind) payload)
-          (stat! st kind)))
+          (rec/handle-in! (assoc x :turn (:turn ev)) (name kind) payload)
+          (stat! st kind))))
       (store/close! store)
       (catch Throwable e (.destroy ^Process (:proc store)) (throw e))
       (finally (shadow/close! sh)))
