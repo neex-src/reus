@@ -203,11 +203,11 @@
 
 (defn- session-commit!
   "A commit on the branch of st: the whole tree of the worktree at root now plus .claude-trace (keep?:
-  the tree of the branch's previous commit, only .claude-trace changes); the real HEAD of that
-  worktree is a trailer and is remembered as the branch's work on it."
+  the tree and Real-Head of the branch's previous commit, only .claude-trace changes); the real
+  HEAD of that worktree is a trailer and is remembered as the branch's work on it. {:id :head}"
   [x st root subject body pairs ttree & [keep?]]
   (let [p (assoc (project-of-state st) :root root)
-        head (disk/real-head (:d x) p)
+        head (if keep? (or (:thead st) (disk/real-head (:d x) p)) (disk/real-head (:d x) p))
         snap (if keep? {:keep true} (disk/snapshot (:d x) p))
         parent (tip x (:branch st))
         c (store/commit! (:s x) {:parents (vec (remove nil? [parent]))
@@ -216,7 +216,7 @@
                                  :body (with-trailers body (concat pairs [["Real-Head" head]]))})]
     (note-head! x head (:branch st))
     (advance! x (:branch st) c)
-    c))
+    {:id c :head head}))
 
 ;; --- what a tool call did -------------------------------------------------------
 
@@ -288,9 +288,9 @@
     (when (and open? (tip x branch))
       (mirror! x (project-of-state st))
       (let [files (assoc (or (store/kv (:s x) :tfiles key) {}) "reply.md" reply)
-            c (session-commit! x st (or (:troot st) (:root st)) (str "response " nn) ""
-                               (concat (turn-trailers (:turn x)) (reports-of x reports) [["Cwd" cwd]])
-                               (store/tree! (:s x) files) true)]
+            c (:id (session-commit! x st (or (:troot st) (:root st)) (str "response " nn) ""
+                                    (concat (turn-trailers (:turn x)) (reports-of x reports) [["Cwd" cwd]])
+                                    (store/tree! (:s x) files) true))]
         (when note? (note! x c))))
     (when st (state! x key (assoc st :open? false :reports [])))))
 
@@ -310,23 +310,24 @@
           reports (vec (keep #(take-pending! x %) (map second (re-seq #"<task-id>([A-Za-z0-9]+)</task-id>" (str prompt)))))
           files (assoc (disk/trace-files (:d x) session_id cwd transcript_path) "prompt.md" prompt)
           ttree (store/tree! (:s x) files)
-          st {:project project :root root :troot troot :common common :git-dir (:git-dir p) :branch branch :nn nn :k 0 :ttree ttree
+          st {:project project :root root :troot troot :thead (when continuing? (:thead prev)) :common common :git-dir (:git-dir p) :branch branch :nn nn :k 0 :ttree ttree
               :open? true :cwd cwd :session session_id :subject subject :reports []
               :prompt-id (get-in x [:turn :prompt-id])}
           _ (when-not (tip x branch) (advance! x branch (tip x (main-branch project))))
-          c (session-commit! x st troot subject (str "session " session_id "\ncwd " cwd "\nroot " root)
-                             (concat [["Cwd" cwd] ["Prompt-Id" (get-in x [:turn :prompt-id])]] (reports-of x reports))
-                             ttree continuing?)]
+          {c :id head :head} (session-commit! x st troot subject (str "session " session_id "\ncwd " cwd "\nroot " root)
+                                              (concat [["Cwd" cwd] ["Prompt-Id" (get-in x [:turn :prompt-id])]] (reports-of x reports))
+                                              ttree continuing?)]
       (note! x c)
       (when-let [out (some->> (re-find #"<output-file>(.+?)</output-file>" (str prompt)) second str/trim (disk/external-text (:d x)))]
         (store/note! (:s x) output-ref c out))
       (store/kv! (:s x) :counters branch n)
       (store/kv! (:s x) :tfiles session_id files)
-      (state! x session_id st))))
+      (state! x session_id (assoc st :thead head)))))
 
 (defn- call-dir
-  "Where a call acted: the directory of the file it names, else the directory of a leading
-  `cd X &&` or a `git -C X`, else its cwd."
+  "Where a call demonstrably acted: the directory of the file it names, of a leading `cd X &&` or a
+  `git -C X`, or the shell's cwd for a shell call. Nil for any other call (an Agent, a web fetch, an
+  MCP tool without a path ...): it says nothing about a worktree."
   [{:strs [tool_input cwd]}]
   (let [abs (fn [d] (let [d (str/replace (str d) #"^['\"]|['\"]$" "")
                           d (if (str/starts-with? d "~") (str (fs/home) (subs d 1)) d)]
@@ -336,16 +337,18 @@
     (or (when-let [f (some #(get tool_input %) ["file_path" "path" "notebook_path"])]
           (when (str/starts-with? (str f) "/") (str (fs/parent f))))
         (when-let [cmd (get tool_input "command")]
-          (some-> (or (re-find #"^\s*cd\s+(\S+)\s*(?:&&|;)" cmd) (re-find #"git\s+-C\s+(\S+)" cmd)) second abs fs/normalize str))
-        cwd)))
+          (or (some-> (or (re-find #"^\s*cd\s+(\S+)\s*(?:&&|;)" cmd) (re-find #"git\s+-C\s+(\S+)" cmd)) second abs fs/normalize str)
+              cwd)))))
 
 (defn- call-root
-  "The worktree a call acted in (its file's, or its cd's, else its cwd's): the session's own unless
-  that is another worktree of the same project. Remembered per directory."
+  "The worktree a call acted in (see call-dir), nil when it did not demonstrably act in one: the
+  session's own unless that is another worktree of the same project. Remembered per directory."
   [x st in]
   (let [dir (call-dir in)]
-    (if (or (str/blank? dir) (= dir (:root st)))
-      (:root st)
+    (cond
+      (str/blank? dir) nil
+      (= dir (:root st)) (:root st)
+      :else
       (let [k (store/blob-sha (str (:project st) " " dir))]
         (or (store/kv (:s x) :roots k)
             (let [p (loop [d dir n 0]
@@ -360,7 +363,8 @@
     (when-let [{:keys [branch nn open? k] :as st} (state x key)]
       (when (and open? (tip x branch))
         (mirror! x (project-of-state st))
-        (let [root (call-root x st in)
+        (let [acted (call-root x st in)
+              root (or acted (:troot st) (:root st))
               k (inc k)
               tool (short-tool tool_name)
               cmd (command-of in)
@@ -372,15 +376,16 @@
               rel (some->> file (rel-of root))
               exit (some-> (re-find #"(?i)exit code:?\s*(\d+)" (subs text 0 (min 80 (count text)))) second)
               summary (if (and rel (not= cmd (get tool_input "command"))) rel (first-line cmd 70))
-              c (session-commit! x st root (format "%s.%d %s: %s" nn k tool summary) cmd
-                                 (concat [["Tool" tool] ["File" rel] ["Exit" exit]
-                                          ["Error" (when bad? (first-line text 100))]]
-                                         (turn-trailers (:turn x))
-                                         [["Prompt-Id" (:prompt-id st)] ["Agent" (get in "agent_type")] ["Cwd" cwd]])
-                                 (:ttree st))]
+              {c :id head :head}
+              (session-commit! x st root (format "%s.%d %s: %s" nn k tool summary) cmd
+                               (concat [["Tool" tool] ["File" rel] ["Exit" exit]
+                                        ["Error" (when bad? (first-line text 100))]]
+                                       (turn-trailers (:turn x))
+                                       [["Prompt-Id" (:prompt-id st)] ["Agent" (get in "agent_type")] ["Cwd" cwd]])
+                               (:ttree st) (nil? acted))]
           (store/note! (:s x) output-ref c text)
           (note! x c)
-          (state! x key (assoc st :k k :troot root)))))))
+          (state! x key (assoc st :k k :troot root :thead head)))))))
 
 ;; --- subagents ----------------------------------------------------------------------
 
@@ -421,19 +426,19 @@
       (let [anid (str nn "-a" agent_id)
             ab (agent-branch project session_id agent_id)
             brief (agent-brief x session_id agent_id transcript_path)
-            aroot (call-root x st {"cwd" cwd})
+            aroot (or (:troot st) (:root st))
             subject (str "prompt " anid ": " (clip (str agent_type ": " (first-line brief 80)) 100))
             files (assoc (disk/trace-files (:d x) session_id cwd nil) "prompt.md" brief)
             ttree (store/tree! (:s x) files)
-            ast {:ttree ttree :project project :root aroot :troot aroot :common common :git-dir (:git-dir st) :branch ab :nn anid :k 0 :open? true
+            ast {:ttree ttree :project project :root aroot :troot aroot :thead (:thead st) :common common :git-dir (:git-dir st) :branch ab :nn anid :k 0 :open? true
                  :cwd cwd :session session_id :agent true :subject subject :reports []}]
         (mirror! x (project-of-state st))
         (advance! x ab t)
-        (let [c (session-commit! x ast aroot subject
+        (let [c (:id (session-commit! x ast aroot subject
                                  (str "session " session_id "\ncwd " cwd "\nroot " aroot "\nagent " agent_type
                                       "\nagent_id " agent_id "\nparent " branch)
                                  [["Cwd" cwd] ["Agent" agent_type]]
-                                 ttree)]
+                                 ttree true))]
           (note! x c)
           (store/kv! (:s x) :tfiles (agent-key agent_id) files)
           (state! x (agent-key agent_id) ast))))))
