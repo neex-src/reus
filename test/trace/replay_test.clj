@@ -87,7 +87,7 @@
 
 (deftest worktrees-named-by-commands
   (let [ev (fn [cmd] {:kind :tool :payload {"cwd" "/r/p" "tool_input" {"command" cmd}}})]
-    (is (= ["/r/p/.scratch/wt-a" "/r/p/.scratch/wt-b" "/r/q/wt-c" "/r/p/x/wt-d"]
+    (is (= [["/r/p/.scratch/wt-a" "feature/a"] ["/r/p/.scratch/wt-b" "chore/x"] ["/r/q/wt-c" nil] ["/r/p/x/wt-d" "d"]]
            (rp/worktree-adds [(ev "git worktree add .scratch/wt-a -b feature/a main 2>&1")
                               (ev "git worktree add -q -b chore/x .scratch/wt-b HEAD")
                               (ev "git -C /r/q worktree add --detach wt-c main >/dev/null")

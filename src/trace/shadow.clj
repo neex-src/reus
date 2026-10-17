@@ -15,7 +15,9 @@
   HEAD. (sync! sh orig-path ts branch) puts the worktree that holds orig-path on the
   commit it had at ts (epoch ms), best source first:
     :reflog  that worktree's HEAD reflog (main checkout, worktrees that still exist)
-    :branch  the reflog of `branch` (the transcript entry's gitBranch)
+    :branch  the reflog of the worktree's branch (from its `worktree add`), else of
+             `branch` (the transcript entry's gitBranch, which is the session's, not
+             necessarily the cwd's)
     :history `branch`'s first-parent history (or, deleted, the 2nd parent of its
              `Merge <branch>` commit), the last commit made before ts
     :main    the default branch's first-parent history before ts
@@ -23,7 +25,8 @@
   checkout or commit leaves them), `reset --hard` when that refuses.
 
   Evidence. (write! sh orig-path content) / (delete! ...) put what the transcript proves
-  into the shadow (trace.replay applies edits, bash edit diffs, full reads)."
+  into the shadow (trace.replay applies edits, bash edit diffs, full reads); a path
+  outside every repo goes to the overlay <base>/_abs<path>, which local then prefers."
   (:require [babashka.fs :as fs]
             [babashka.process :as p]
             [clojure.string :as str]))
@@ -96,11 +99,13 @@
           orig-root))))
 
 (defn worktree!
-  "Note that orig dir wt was a git worktree (a `git worktree add` in a transcript)."
-  [sh wt]
+  "Note that orig dir wt was a git worktree (a `git worktree add` in a transcript), on
+  branch (nil when unknown or detached)."
+  [sh wt & [branch]]
   (when-let [r (open-root! sh wt)]
     (when (and (not= r (str wt)) (not (contains? (get-in @sh [:roots r :worktrees]) (str wt))))
-      (swap! sh assoc-in [:roots r :worktrees (str wt)] nil))))
+      (swap! sh assoc-in [:roots r :worktrees (str wt)] nil))
+    (when branch (swap! sh assoc-in [:roots r :branches (str wt)] branch))))
 
 (defn- wt-of
   "[orig-root orig-worktree] holding orig path p (the worktree is the root itself when
@@ -110,12 +115,16 @@
     [r (or (first (filter #(under? % (str p)) (sort-by (comp - count) (keys (get-in @sh [:roots r :worktrees])))))
            r)]))
 
+(defn- overlay [sh] (str (fs/path (:base @sh) "_abs")))
+
 (defn local
-  "Where orig path p is in the shadow (p itself outside every shadow)."
+  "Where orig path p is in the shadow. Outside every repo: its copy in the overlay
+  <base>/_abs when the transcript wrote one, else p itself (today's disk)."
   [sh p]
   (if-let [r (and p (root-of sh p))]
     (swap-prefix p r (get-in @sh [:roots r :shadow]))
-    p))
+    (let [o (when (and p (fs/absolute? p)) (str (overlay sh) p))]
+      (if (and o (fs/exists? o)) o p))))
 
 (defn orig
   "The inverse of local."
@@ -123,7 +132,7 @@
   (if-let [[r {:keys [shadow]}] (and p (first (filter #(under? (:shadow (val %)) (str p))
                                                       (sort-by (comp - count :shadow val) (:roots @sh)))))]
     (swap-prefix p shadow r)
-    p))
+    (if (and p (under? (overlay sh) (str p))) (subs (str p) (count (overlay sh))) p)))
 
 ;; --- which commit was checked out -------------------------------------------------
 
@@ -177,7 +186,10 @@
                       (when (fs/exists? (fs/path common "worktrees")) (fs/list-dir (fs/path common "worktrees")))))
         head-log (if (= r wt) (str (fs/path common "logs" "HEAD")) (some-> admin (fs/path "logs" "HEAD") str))
         branch (when-not (contains? #{nil "" "HEAD"} branch) branch)
-        default (some #(when (sh! repo "rev-parse" "-q" "--verify" (str "refs/heads/" %)) %) ["main" "master"])]
+        default (or (get-in @sh [:cache :default repo])
+                    (let [d (some #(when (sh! repo "rev-parse" "-q" "--verify" (str "refs/heads/" %)) %) ["main" "master"])]
+                      (swap! sh assoc-in [:cache :default repo] d)
+                      d))]
     (or (some-> head-log (#(at (reflog sh %) ts)) second (vector :reflog))
         (some-> branch (#(at (reflog sh (str (fs/path common "logs" "refs" "heads" %))) ts)) second (vector :branch))
         (some-> branch (#(or (when (sh! repo "rev-parse" "-q" "--verify" (str "refs/heads/" %)) (str "refs/heads/" %))
@@ -196,7 +208,7 @@
   (when-let [[r wt] (wt-of sh p)]
     (let [{:keys [shadow worktrees]} (get-in @sh [:roots r])
           swt (if (= r wt) shadow (or (get worktrees wt) (swap-prefix wt r shadow)))
-          [sha src] (head-at sh r wt ts branch)]
+          [sha src] (head-at sh r wt ts (or (get-in @sh [:roots r :branches wt]) branch))]
       (when sha
         (cond
           (and (= r wt) (not (get-in @sh [:heads swt])))
@@ -222,15 +234,20 @@
 
 ;; --- evidence ------------------------------------------------------------------------
 
-(defn inside? "Is orig path p in a shadow (so it may be written)?" [sh p] (boolean (and p (root-of sh p))))
+(defn- target
+  "Where a write of orig path p goes: its shadow, else the overlay; never today's disk."
+  [sh p]
+  (when (and p (fs/absolute? p))
+    (if (root-of sh p) (local sh p) (str (overlay sh) p))))
+
+(defn writable? "Can orig path p be written (an absolute path)?" [sh p] (boolean (target sh p)))
 
 (defn write! [sh p content]
-  (when (inside? sh p)
-    (let [f (local sh p)]
-      (fs/create-dirs (fs/parent f))
-      (spit f content)
-      true)))
+  (when-let [f (target sh p)]
+    (fs/create-dirs (fs/parent f))
+    (spit f content)
+    true))
 
-(defn delete! [sh p] (when (inside? sh p) (fs/delete-if-exists (local sh p))))
+(defn delete! [sh p] (some-> (target sh p) fs/delete-if-exists))
 
 (defn content [sh p] (let [f (local sh p)] (when (and f (fs/regular-file? f)) (slurp f))))

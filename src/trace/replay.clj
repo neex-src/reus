@@ -3,8 +3,8 @@
   and fed, in time order, to trace.record, which runs against a shadow of each project
   as it was then (trace.shadow), with git dates set to the event times.
 
-    bb trace:replay <sel> [--repo dir] [--map orig=dir]... [--force]
-  sel as in jsonl:ls; every selected session, with its subagent runs, is one stream
+    bb trace:replay <sel>... [--repo dir] [--map orig=dir]... [--force]
+  sel as in jsonl:ls (several add up); every selected session, with its subagent runs, is one stream
   sorted by time, so prompt numbers follow reality across concurrent sessions. The repo
   (default var/replay; never the live one) is refused when it exists, unless --force
   replaces it; the shadows are <repo>-wt.
@@ -50,19 +50,36 @@
 (defn- result-text [c] (if (string? c) c (str/join "\n" (keep #(get % "text") c))))
 (defn- tag [s t] (some-> (re-find (re-pattern (str "(?s)<" t ">(.*?)</" t ">")) (str s)) second str/trim))
 
+(defn- handed-back?
+  "A notification that an agent finished whose report came as an <agent-message>: the
+  message was the prompt, the notification is not (seen in the live traces)."
+  [p]
+  (boolean (and (re-find #"<summary>Agent .* finished</summary>" p)
+                (str/includes? p "report was delivered to you as a message"))))
+
+(defn- agent-message [t]
+  (when-let [i (str/index-of t "<agent-message")]
+    (let [s (subs t i) j (str/index-of s "</agent-message>")]
+      (if j (subs s 0 (+ j (count "</agent-message>"))) s))))
+
 (defn- prompt-of
-  "The prompt a user/queue entry submitted, or nil."
+  "The prompt a user/queue entry submitted, or nil. What makes a UserPromptSubmit was
+  read off the live traces: typed prompts (also typed ahead into a running turn: a queue
+  `remove`), an agent's hand-back <agent-message>, a task notification unless handed back,
+  slash commands."
   [e]
-  (let [c (get-in e ["message" "content"])]
+  (let [c (get-in e ["message" "content"])
+        t (if (string? c) c (str/join "\n" (keep #(get % "text") (blocks e))))]
     (cond
       (= "queue-operation" (get e "type"))
-      (when (and (= "remove" (get e "operation")) (str/starts-with? (str (get e "content")) "<task-notification>"))
-        (get e "content"))
+      (let [q (str (get e "content"))]
+        (when (and (= "remove" (get e "operation")) (not (str/blank? q)) (not (handed-back? q)))
+          (if (str/starts-with? q "<agent-message") (agent-message q) q)))
       (not= "user" (get e "type")) nil
-      (get e "isMeta") nil
-      (and (string? c) (str/starts-with? c "<command-name>"))
-      (str/trim (str (tag c "command-name") " " (tag c "command-args")))
-      (and (string? c) (str/starts-with? c "<task-notification>")) c
+      (get e "isMeta") (when (str/starts-with? t "Another Claude session sent a message:") (agent-message t))
+      (str/starts-with? t "[Request interrupted by user") nil
+      (str/starts-with? t "<command-name>") (str/trim (str (tag t "command-name") " " (tag t "command-args")))
+      (str/starts-with? t "<task-notification>") (when-not (handed-back? t) t)
       :else (jr/prompt-text (json/parse-string (json/generate-string e) true)))))
 
 (defn- event [kind ts file line payload & [extra]]
@@ -73,7 +90,8 @@
 (defn- tool-events
   "Tool events of a transcript's entries; agent: {agent_id agent_type} or nil."
   [f es sid agent]
-  (let [uses (into {} (for [[_ e] es b (blocks e) :when (= "tool_use" (get b "type"))] [(get b "id") b]))]
+  (let [uses (into {} (for [[_ e] es b (blocks e) :when (= "tool_use" (get b "type"))]
+                        [(get b "id") (assoc b :start (ms (get e "timestamp")))]))]
     (for [[n e] es :when (= "user" (get e "type"))
           b (blocks e) :when (= "tool_result" (get b "type"))
           :let [u (get uses (get b "tool_use_id"))] :when u]
@@ -87,47 +105,58 @@
                                "tool_response" (if (some? r) r (get b "content"))}
                               agent)
                  err? (assoc "error" (result-text (get b "content"))))
-               {:branch (get e "gitBranch") :result r})))))
+               {:branch (get e "gitBranch") :result r :start (:start u)})))))
 
 (defn- session-events
-  "Prompts, tool calls, stops and SessionEnd of a main transcript."
+  "Prompts, tool calls, stops and SessionEnd of a main transcript. A turn ends at its
+  stop-hook summary (older transcripts without them: at an end_turn message); a prompt
+  that comes while a turn runs (typed ahead, an agent's hand-back) does not end it."
   [f]
   (let [es (lines f)
         sid (or (some #(get (second %) "sessionId") es) (str (fs/strip-ext (fs/file-name f))))
+        summaries? (some #(= "stop_hook_summary" (get (second %) "subtype")) es)
         cwd-at (fn [i] (or (some #(get (second %) "cwd") (rseq (subvec es 0 (inc i)))) (some #(get (second %) "cwd") es)))
-        turn-end (fn [{:keys [last-ts stop-ts text]} i]
-                   (event :stop (or stop-ts last-ts) f (first (nth es i))
-                          {"session_id" sid "hook_event_name" "Stop" "last_assistant_message" (or text "")}))
+        stop (fn [st ts n]
+               (-> st
+                   (update :out conj (event :stop ts f n {"session_id" sid "hook_event_name" "Stop"
+                                                          "last_assistant_message" (or (get-in st [:open :text]) "")}))
+                   (assoc :open nil)))
         step (fn [{:keys [open seen] :as st} [i [n e]]]
                (let [p (prompt-of e)
-                     task (when p (tag p "task-id"))]
+                     ;; an agent message can come both from the queue and as an entry
+                     task (when (and p (str/starts-with? p "<agent-message")) p)
+                     ts (ms (get e "timestamp"))]
                  (cond
                    (and p (not (and task (seen task))))
                    (-> st
-                       (update :out into (concat (when open [(turn-end open (max 0 (dec i)))])
-                                                 [(event :prompt (ms (get e "timestamp")) f n
-                                                         {"session_id" sid "cwd" (cwd-at i)
-                                                          "hook_event_name" "UserPromptSubmit" "prompt" p}
-                                                         {:branch (get e "gitBranch")})]))
-                       (assoc :open {:last-ts (ms (get e "timestamp"))})
+                       (update :out conj (event :prompt ts f n
+                                                {"session_id" sid "cwd" (cwd-at i)
+                                                 "hook_event_name" "UserPromptSubmit" "prompt" p}
+                                                {:branch (get e "gitBranch")}))
+                       (assoc :open {})
                        (cond-> task (update :seen conj task)))
 
                    (and open (= "assistant" (get e "type")))
-                   (let [t (texts e)]
-                     (cond-> (assoc-in st [:open :last-ts] (ms (get e "timestamp")))
-                       (not (str/blank? t)) (assoc-in [:open :text] t)))
+                   (let [t (texts e)
+                         st (cond-> st (not (str/blank? t)) (assoc-in [:open :text] t))]
+                     (if (and (not summaries?) (= "end_turn" (get-in e ["message" "stop_reason"])))
+                       (stop st ts n)
+                       st))
 
                    (and open (= "system" (get e "type")) (= "stop_hook_summary" (get e "subtype")))
-                   (assoc-in st [:open :stop-ts] (ms (get e "timestamp")))
+                   (stop st ts n)
 
                    :else st)))
-        {:keys [out open]} (reduce step {:out [] :seen #{}} (map-indexed vector es))
-        last-ts (some #(ms (get (second %) "timestamp")) (rseq es))]
+        {:keys [out]} (reduce step {:out [] :seen #{}} (map-indexed vector es))
+        last-ts (some #(ms (get (second %) "timestamp")) (rseq es))
+        last-text (some #(let [t (when (= "assistant" (get (second %) "type")) (texts (second %)))]
+                           (when-not (str/blank? t) t))
+                        (rseq es))]
     (concat out
-            (when open [(turn-end open (dec (count es)))])
             (when (seq es)
               [(event :stop last-ts f (first (peek es))
-                      {"session_id" sid "hook_event_name" "SessionEnd" "reason" "replay"})])
+                      {"session_id" sid "hook_event_name" "SessionEnd" "reason" "replay"
+                       "last_assistant_message" (or last-text "")})])
             (tool-events f es sid nil))))
 
 (defn- agent-events [session-file]
@@ -170,22 +199,28 @@
 ;; --- worktrees named by the transcripts ---------------------------------------------
 
 (defn worktree-adds
-  "Orig dirs that `git worktree add` calls created: [dir], resolved against the call's cwd
-  (and a leading `cd x &&`, or `git -C x`)."
+  "Orig dirs that `git worktree add` calls created: [[dir branch]], resolved against the
+  call's cwd (and a leading `cd x &&`, or `git -C x`); branch is the -b/-B one, else a
+  second argument naming a branch, else nil."
   [evs]
   (for [{:keys [kind payload]} evs :when (= kind :tool)
         :let [cmd (str (get-in payload ["tool_input" "command"]))]
         [_ pre c-dir args] (re-seq #"(?:cd\s+(\S+)\s*&&\s*)?git\s+(?:-C\s+(\S+)\s+)?worktree\s+add\s+([^;&|\n]+)" cmd)
         :let [toks (remove #(re-find #"^\d?>" %) (str/split (str/trim args) #"\s+"))
-              path (loop [[t & more] toks]
-                     (cond (nil? t) nil
-                           (#{"-b" "-B" "--reason"} t) (recur (rest more))
-                           (str/starts-with? t "-") (recur more)
-                           :else t))
+              {:keys [b pos detach]}
+              (loop [[t & more] toks o {:pos []}]
+                (cond (nil? t) o
+                      (#{"-b" "-B"} t) (recur (rest more) (assoc o :b (first more)))
+                      (= "--reason" t) (recur (rest more) o)
+                      (= "--detach" t) (recur more (assoc o :detach true))
+                      (str/starts-with? t "-") (recur more o)
+                      :else (recur more (update o :pos conj t))))
+              path (first pos)
+              branch (or b (when-not detach (second pos)))
               base (reduce (fn [b d] (if d (str (fs/path b d)) b))
                            (get payload "cwd") [pre c-dir])]
         :when (and path base)]
-    (str (fs/normalize (fs/path base (str/replace path #"^['\"]|['\"]$" ""))))))
+    [(str (fs/normalize (fs/path base (str/replace path #"^['\"]|['\"]$" "")))) branch]))
 
 ;; --- what the transcript proves about the files --------------------------------------
 
@@ -235,21 +270,23 @@
 
 (defn- evidence!
   "Write into the shadow what a tool event proves. Counted in st."
-  [sh st {:keys [payload result ts]}]
+  [sh st {:keys [payload result ts start] :as ev}]
   (when-not (= "PostToolUseFailure" (get payload "hook_event_name"))
     (when-let [[p c] (edited sh payload result)]
       (when (and c (shadow/write! sh p c)) (stat! st :edit)))
     (doseq [{:strs [filePath hunks]} (when (map? result) (get-in result ["bashEditDiff" "files"]))]
-      (shadow/sync! sh filePath ts nil)
-      (when (shadow/inside? sh filePath)
+      (shadow/sync! sh filePath (or start ts) nil)
+      (when (shadow/writable? sh filePath)
         (let [[c bad] (patch (shadow/content sh filePath) hunks)]
           (if c (shadow/write! sh filePath c) (shadow/delete! sh filePath))
           (stat! st :bash-diff)
-          (when (pos? bad) (stat! st :bash-diff-mismatch)))))
+          (when (pos? bad)
+            (stat! st :bash-diff-mismatch)
+            (swap! st update :mismatched (fnil conj []) [(:file ev) (:line ev) filePath bad])))))
     (when-let [{:strs [filePath content numLines totalLines startLine]}
                (when (and (map? result) (= "text" (get result "type"))) (get result "file"))]
       (when (and filePath (string? content) (= 1 startLine) (= numLines totalLines)
-                 (shadow/inside? sh filePath) (not= content (shadow/content sh filePath)))
+                 (shadow/writable? sh filePath) (not= content (shadow/content sh filePath)))
         (shadow/write! sh filePath content)
         (stat! st :read-fix)))))
 
@@ -268,18 +305,21 @@
   (let [evs (events files)
         sh (shadow/create (str repo "-wt") maps)
         st (atom {})]
-    (doseq [wt (distinct (worktree-adds evs))] (shadow/worktree! sh wt))
+    (doseq [[wt branch] (distinct (worktree-adds evs))] (shadow/worktree! sh wt branch))
     (binding [g/*repo* repo
               rec/*local* #(shadow/local sh %)
               rec/*orig* #(shadow/orig sh %)]
-      (doseq [{:keys [kind ts payload branch] :as ev} evs]
-        (let [cwd (get payload "cwd")]
-          (when cwd
-            (when-not (shadow/sync! sh cwd ts branch :dir? true) (stat! st :no-repo)))
+      (doseq [{:keys [kind ts start payload branch] :as ev} evs]
+        (let [cwd (get payload "cwd")
+              f (when (= kind :tool) (let [f (file-of payload)] (when (and f (fs/absolute? f)) f)))
+              sync! (fn [t] (when f (shadow/sync! sh f t branch))
+                      (when cwd (shadow/sync! sh cwd t branch :dir? true)))]
+          ;; a tool call's evidence applies to the disk as it was when the call started; a
+          ;; commit the call made shows when the disk is then moved to the call's end
           (when (= kind :tool)
-            (when-let [f (file-of payload)]
-              (when (fs/absolute? f) (shadow/sync! sh f ts branch)))
+            (sync! (or start ts))
             (evidence! sh st ev))
+          (when (and cwd (not (sync! ts))) (stat! st :no-repo))
           (binding [g/*env* {"GIT_AUTHOR_DATE" (git-date ts) "GIT_COMMITTER_DATE" (git-date ts)}]
             (rec/handle! (name kind) payload))
           (stat! st kind))))
@@ -292,12 +332,12 @@
                 (= a "--repo") (recur more (assoc o :repo b))
                 (= a "--map") (recur more (update o :maps conj (str/split b #"=" 2)))
                 (= a "--force") (recur (rest as) (assoc o :force true))
-                :else (recur (rest as) (assoc o :sel a))))
+                :else (recur (rest as) (update o :sel (fnil conj []) a))))
         repo (str (fs/absolutize (or repo default-repo)))
-        files (when sel (jr/files sel))]
+        files (distinct (mapcat jr/files sel))]
     (cond
-      (empty? files) (do (println "usage: bb trace:replay <sel> [--repo dir] [--map orig=dir]... [--force]"
-                                  (if sel (str "\nno transcripts for " sel) "")) (System/exit 1))
+      (empty? files) (do (println "usage: bb trace:replay <sel>... [--repo dir] [--map orig=dir]... [--force]"
+                                  (if sel (str "\nno transcripts for " (str/join " " sel)) "")) (System/exit 1))
       (some #{repo} (map #(str (fs/absolutize %)) [g/default-repo g/*repo*]))
       (do (println "refusing to replay into the live trace repo" repo) (System/exit 1))
       (and (fs/exists? repo) (not force))
@@ -307,4 +347,4 @@
           (println "replaying" (count files) "sessions into" repo)
           (doseq [f files] (println " " f))
           (let [s (replay! files repo maps)]
-            (println (pr-str s)))))))
+            (println (pr-str (update s :mismatched #(take 20 %)))))))))
