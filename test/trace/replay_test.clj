@@ -113,8 +113,8 @@
           (is (= [["files/a.clj" 1 1]] (map (juxt :path :add :del) (:files (second (:steps p0))))))
           (is (= "v1\n" (:out (g/git* {} "show" (str (git "log" "-1" "--format=%H" "--grep=^baseline" "proj-p00") ":files/a.clj"))))
               "baseline from originalFile"))
-        (testing "the bash edit diff reached the shadow"
-          (is (= "hello\n" (slurp (str (fs/path (str repo "-wt") "proj" "b.txt"))))))
+        (testing "the bash edit diff reached the shadow: the next command reads b.txt as it holds"
+          (is (= "hello\n" (:out (g/git* {} "cat-file" "-p" (:blob (nth (:steps p0) 2)))))))
         (testing "at 12:30 HEAD is commit two; the edit is in it"
           (is (= "v1x\n" (:out (g/git* {} "cat-file" "-p" (:blob (first (:steps p1)))))))
           (is (:err (second (:steps p1))) "the failure is marked"))
