@@ -44,10 +44,15 @@
 
 (defn project-name [s] (str/replace (str s) #"[^A-Za-z0-9._-]" "_"))
 
+(defn projects-root
+  "Where the projects are, for a cwd outside git: $TRACE_PROJECTS, else ~/projects."
+  []
+  (or (System/getenv "TRACE_PROJECTS") (str (fs/path (fs/home) "projects"))))
+
 (defn projects-project
-  "The project of a cwd outside git: the ~/projects/<name> it sits in."
+  "The project of a cwd outside git: the <projects-root>/<name> it sits in."
   [cwd]
-  (let [projects (str (fs/path (fs/home) "projects"))]
+  (let [projects (projects-root)]
     (when-let [[_ n] (re-find (re-pattern (str "^\\Q" projects "\\E/([^/]+)")) cwd)]
       {:project (project-name n) :root (str (fs/path projects n))})))
 
