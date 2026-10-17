@@ -40,7 +40,8 @@
   dangling branch. SessionEnd closes agents still open.
 
   Every event's hook stdin is kept verbatim as a git note (refs/notes/event) on the commit
-  it made, so nothing of the payload is dropped.
+  it made, so nothing of the payload is dropped. Beside it, refs/notes/probe says whether the
+  session transcript already held the event when the hook fired (trace.probe; live only).
 
   Nothing is ever checked out: commits are built with a private index and
   commit-tree and moved with update-ref, under one mkdir lock, so concurrent
@@ -57,7 +58,8 @@
             [clojure.java.io :as io]
             [clojure.string :as str]
             [trace.agents :as agents]
-            [trace.git :as g :refer [git]]))
+            [trace.git :as g :refer [git]]
+            [trace.probe :as probe]))
 
 (def delim "--- error ---")
 
@@ -114,20 +116,29 @@
                    ["-m" subject] (when-not (str/blank? body) ["-m" body])))))
 
 (def ^:dynamic *raw* "The hook stdin of the event being handled, as received." nil)
+(def ^:dynamic *probe?* "Measure the transcript at hook time (the live hook; not a replay)." false)
+(def ^:dynamic *probed* "The probe of the event being handled." nil)
 
 (def notes-ref "refs/notes/event")
+(def probe-ref "refs/notes/probe")
+
+(defn- add-note!
+  "Note content on commit sha in ref (notes tree built like commit!)."
+  [ref sha content]
+  (let [env {:extra-env {"GIT_INDEX_FILE" (gitdir "trace-index")}}
+        parent (tip ref)]
+    (if parent (git "read-tree" parent env) (git "read-tree" "--empty" env))
+    (git "update-index" "--add" "--cacheinfo" (str "100644," (blob! content) "," sha) env)
+    (git "update-ref" ref
+         (apply git "commit-tree" (git "write-tree" env)
+                (concat (when parent ["-p" parent]) ["-m" (last (str/split ref #"/"))])))))
 
 (defn- note!
-  "Keep the event's raw payload as a note on commit sha (notes tree built like commit!)."
+  "Keep the event's raw payload (and its probe) as notes on commit sha."
   [sha]
   (when *raw*
-    (let [env {:extra-env {"GIT_INDEX_FILE" (gitdir "trace-index")}}
-          parent (tip notes-ref)]
-      (if parent (git "read-tree" parent env) (git "read-tree" "--empty" env))
-      (git "update-index" "--add" "--cacheinfo" (str "100644," (blob! *raw*) "," sha) env)
-      (git "update-ref" notes-ref
-           (apply git "commit-tree" (git "write-tree" env)
-                  (concat (when parent ["-p" parent]) ["-m" "event"]))))))
+    (add-note! notes-ref sha *raw*)
+    (when *probed* (add-note! probe-ref sha (pr-str *probed*)))))
 
 (defn- advance! [branch sha] (git "update-ref" (str "refs/heads/" branch) sha))
 (defn- has? [rev path] (zero? (:exit (g/git* {} "cat-file" "-e" (str rev ":" path)))))
@@ -376,7 +387,8 @@
   "Handle one hook event; raw is its stdin as received (default: the parsed input re-encoded)."
   [event input & [raw]]
   (ensure-repo!)
-  (binding [*raw* (or raw (json/generate-string input))]
+  (binding [*raw* (or raw (json/generate-string input))
+            *probed* (when *probe?* (probe/measure event input))]
     (with-lock
       #(case event
          "prompt" (on-prompt input)
@@ -390,7 +402,7 @@
   (let [raw (slurp *in*)
         input (try (json/parse-string raw) (catch Exception _ {}))]
     (try
-      (handle! event input raw)
+      (binding [*probe?* true] (handle! event input raw))
       (catch Throwable e
         (try (spit (gitdir "trace-errors.log")
                    (str (java.time.Instant/now) " " event " " (get input "session_id") " " (ex-message e) "\n")
