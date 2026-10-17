@@ -202,12 +202,13 @@
    ["Cache-Read" (:cache_read_input_tokens usage)] ["Cache-Write" (:cache_creation_input_tokens usage)]])
 
 (defn- session-commit!
-  "A commit on the branch of st: the whole tree of its worktree now plus .claude-trace; the
-  real HEAD is a trailer and is remembered as the branch's work on it."
-  [x st root subject body pairs ttree & [author]]
+  "A commit on the branch of st: the whole tree of the worktree at root now plus .claude-trace (keep?:
+  the tree of the branch's previous commit, only .claude-trace changes); the real HEAD of that
+  worktree is a trailer and is remembered as the branch's work on it."
+  [x st root subject body pairs ttree & [keep?]]
   (let [p (assoc (project-of-state st) :root root)
         head (disk/real-head (:d x) p)
-        snap (disk/snapshot (:d x) p)
+        snap (if keep? {:keep true} (disk/snapshot (:d x) p))
         parent (tip x (:branch st))
         c (store/commit! (:s x) {:parents (vec (remove nil? [parent]))
                                  :tree (assoc snap :subtrees {".claude-trace" ttree})
@@ -287,9 +288,9 @@
     (when (and open? (tip x branch))
       (mirror! x (project-of-state st))
       (let [files (assoc (or (store/kv (:s x) :tfiles key) {}) "reply.md" reply)
-            c (session-commit! x st (:root st) (str "response " nn) ""
+            c (session-commit! x st (or (:troot st) (:root st)) (str "response " nn) ""
                                (concat (turn-trailers (:turn x)) (reports-of x reports) [["Cwd" cwd]])
-                               (store/tree! (:s x) files))]
+                               (store/tree! (:s x) files) true)]
         (when note? (note! x c))))
     (when st (state! x key (assoc st :open? false :reports [])))))
 
@@ -300,19 +301,22 @@
     (mirror! x p)
     (ensure-main! x p)
     (let [branch (session-branch project session_id)
+          prev (state x session_id)
           n (inc (or (store/kv (:s x) :counters branch) -1))
+          continuing? (and (pos? n) (= branch (:branch prev)) (tip x branch))
+          troot (if continuing? (or (:troot prev) (:root prev)) root)
           nn (format "%02d" n)
           subject (str "prompt " nn ": " (clip prompt 100))
           reports (vec (keep #(take-pending! x %) (map second (re-seq #"<task-id>([A-Za-z0-9]+)</task-id>" (str prompt)))))
           files (assoc (disk/trace-files (:d x) session_id cwd transcript_path) "prompt.md" prompt)
           ttree (store/tree! (:s x) files)
-          st {:project project :root root :common common :git-dir (:git-dir p) :branch branch :nn nn :k 0 :ttree ttree
+          st {:project project :root root :troot troot :common common :git-dir (:git-dir p) :branch branch :nn nn :k 0 :ttree ttree
               :open? true :cwd cwd :session session_id :subject subject :reports []
               :prompt-id (get-in x [:turn :prompt-id])}
           _ (when-not (tip x branch) (advance! x branch (tip x (main-branch project))))
-          c (session-commit! x st root subject (str "session " session_id "\ncwd " cwd "\nroot " root)
+          c (session-commit! x st troot subject (str "session " session_id "\ncwd " cwd "\nroot " root)
                              (concat [["Cwd" cwd] ["Prompt-Id" (get-in x [:turn :prompt-id])]] (reports-of x reports))
-                             ttree)]
+                             ttree continuing?)]
       (note! x c)
       (when-let [out (some->> (re-find #"<output-file>(.+?)</output-file>" (str prompt)) second str/trim (disk/external-text (:d x)))]
         (store/note! (:s x) output-ref c out))
@@ -376,36 +380,57 @@
                                  (:ttree st))]
           (store/note! (:s x) output-ref c text)
           (note! x c)
-          (state! x key (assoc st :k k)))))))
+          (state! x key (assoc st :k k :troot root)))))))
 
 ;; --- subagents ----------------------------------------------------------------------
 
-(defn- agent-brief
-  "The brief a subagent was given: the first message of its transcript (written as it starts)."
-  [session-id agent-id]
-  (loop [n 0]
-    (if-let [f (agents/find-file session-id agent-id ".jsonl")]
-      (or (with-open [r (io/reader (str f))]
-            (some-> (first (line-seq r)) (json/parse-string true) :message :content
-                    (#(if (string? %) % (str/join "\n" (keep :text %))))))
-          "")
-      (if (< n 10) (do (Thread/sleep 100) (recur (inc n))) ""))))
+(defn- brief-from-agent-file [session-id agent-id]
+  (when-let [f (agents/find-file session-id agent-id ".jsonl")]
+    (with-open [r (io/reader (str f))]
+      (some-> (first (line-seq r)) (json/parse-string true) :message :content
+              (#(if (string? %) % (str/join "\n" (keep :text %))))))))
 
-(defn on-subagent-start [x {:strs [session_id agent_id agent_type cwd]}]
+(defn- brief-from-parent
+  "What the parent asked: the prompt of its Agent tool_use, found in the tail of its transcript - the
+  one the agent's meta.json names when that file is there yet, else the newest not taken by an agent."
+  [x session-id agent-id transcript]
+  (when (and transcript (fs/exists? transcript))
+    (let [want (some-> (agents/find-file session-id agent-id ".meta.json") str slurp (json/parse-string true) :toolUseId)
+          uses (for [e (rseq (turn/read-entries (:lines (probe/tail-lines transcript (* 8 1024 1024)))))
+                     :when (= "assistant" (get e "type"))
+                     b (get-in e ["message" "content"]) :when (and (= "tool_use" (get b "type")) (#{"Agent" "Task"} (get b "name")))]
+                 b)
+          use (if want
+                (first (filter #(= want (get %1 "id")) uses))
+                (first (remove #(store/kv (:s x) :agent-uses (get % "id")) uses)))]
+      (when use
+        (store/kv! (:s x) :agent-uses (get use "id") agent-id)
+        (get-in use ["input" "prompt"])))))
+
+(defn- agent-brief
+  "The brief a subagent was given: the first message of its transcript when that is there yet,
+  else the prompt of the parent's Agent call (the agent's file is written after SubagentStart)."
+  [x session-id agent-id transcript]
+  (or (try (brief-from-agent-file session-id agent-id) (catch Exception _ nil))
+      (try (brief-from-parent x session-id agent-id transcript) (catch Exception _ nil))
+      ""))
+
+(defn on-subagent-start [x {:strs [session_id agent_id agent_type cwd transcript_path]}]
   (when-let [{:keys [project branch nn root common] :as st} (state x session_id)]
     (when-let [t (and agent_id (tip x branch))]
       (let [anid (str nn "-a" agent_id)
             ab (agent-branch project session_id agent_id)
-            brief (agent-brief session_id agent_id)
+            brief (agent-brief x session_id agent_id transcript_path)
+            aroot (call-root x st {"cwd" cwd})
             subject (str "prompt " anid ": " (clip (str agent_type ": " (first-line brief 80)) 100))
             files (assoc (disk/trace-files (:d x) session_id cwd nil) "prompt.md" brief)
             ttree (store/tree! (:s x) files)
-            ast {:ttree ttree :project project :root root :common common :git-dir (:git-dir st) :branch ab :nn anid :k 0 :open? true
+            ast {:ttree ttree :project project :root aroot :troot aroot :common common :git-dir (:git-dir st) :branch ab :nn anid :k 0 :open? true
                  :cwd cwd :session session_id :agent true :subject subject :reports []}]
         (mirror! x (project-of-state st))
         (advance! x ab t)
-        (let [c (session-commit! x ast root subject
-                                 (str "session " session_id "\ncwd " cwd "\nroot " root "\nagent " agent_type
+        (let [c (session-commit! x ast aroot subject
+                                 (str "session " session_id "\ncwd " cwd "\nroot " aroot "\nagent " agent_type
                                       "\nagent_id " agent_id "\nparent " branch)
                                  [["Cwd" cwd] ["Agent" agent_type]]
                                  ttree)]

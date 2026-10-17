@@ -86,7 +86,7 @@
   (->> (branches-of tips main)
        (mapcat (fn [b] (map (fn [r] [(:at r) (prompt-id b (second (re-find #"^prompt ([\w-]+):" (:subject r))))])
                             (filter #(re-find #"^prompt [\w-]+:" (:subject %)) (own-commits (get tips b) (str/includes? b "/a/"))))))
-       (sort-by first)
+       (sort-by (fn [[at id]] [at (if (str/includes? (first (str/split id #"@")) "-") 1 0)])) ; an agent after its parent in the same second
        (mapv second)))
 
 (defn- branch-of-id [main id]

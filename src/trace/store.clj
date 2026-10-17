@@ -9,6 +9,7 @@
   are \"Name <mail> epoch +zone\" (default: reus-trace, now / the batch's date) and
   T = {:base tree-sha|nil :subtrees {dir tree-id} :changes {path content|nil}}: the tree
   of base, with the trees (tree! s files) made put in at dirs, and files set or (nil) removed.
+  {:keep true} instead of :base: the tree of the first parent (only the subtrees change).
   Content is a string or bytes.
 
   Key/value state (kv): namespaces :sessions (open prompts), :pending (finished agents),
@@ -169,7 +170,9 @@
   (tree! [_ files] (in repo (if (empty? files) empty-tree (live-tree! repo files))))
   (commit! [_ {:keys [parents tree subject body author committer]}]
     (in repo
-      (apply git "commit-tree" (live-tree repo tree)
+      (apply git "commit-tree" (live-tree repo (if (:keep tree)
+                                                 (assoc tree :base (git "rev-parse" (str (first parents) "^{tree}")))
+                                                 tree))
              (concat (mapcat #(vector "-p" %) parents)
                      ["-m" subject] (when-not (str/blank? body) ["-m" body])
                      [{:extra-env (ident-env author committer)}]))))
@@ -268,10 +271,12 @@
   (blob! [this content] (emit-blob! this content) (blob-sha content))
   (tree! [_ files] {::tree files})
   (commit! [this {:keys [parents tree subject body author committer]}]
-    (let [{:keys [base subtrees changes]} tree
+    (let [{:keys [base subtrees changes keep]} tree
           complete (fn [t] (if (str/ends-with? t "\n") t (str t "\n")))
           msg (str (complete (str subject)) (when-not (str/blank? body) (str "\n" (complete body))))
-          lines (doall (concat [(if base (str "M 040000 " base " \"\"") "deleteall")]
+          lines (doall (concat (if keep
+                                 (map #(str "D " %) (keys subtrees))
+                                 [(if base (str "M 040000 " base " \"\"") "deleteall")])
                         (mapcat (fn [[d t]] (file-lines this (str d "/") (::tree t))) subtrees)
                         (file-lines this "" changes)))]
       (emit-commit! this "refs/tmp/fi" msg parents lines author committer)))
