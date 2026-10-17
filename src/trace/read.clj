@@ -6,6 +6,7 @@
             [cheshire.core :as json]
             [clojure.edn :as edn]
             [clojure.string :as str]
+            [trace.agents :as agents]
             [trace.git :as g :refer [git cat-batch]]))
 
 (defn tips
@@ -137,6 +138,7 @@
                       (let [t (when (:result s) (get texts (str (:sha s) ":" (:result s))))]
                         (cond-> s
                           t (assoc :lines (count (str/split-lines t)))
+                          (and t (= "Agent" (:tool (:call s)))) (assoc :agent-id (agents/agent-id t))
                           (and t (str/starts-with? t "--- error ---")) (assoc :err true)
                           (and (:result s) (nil? t)) (assoc :result nil :same true))))
                     steps)
