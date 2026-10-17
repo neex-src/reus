@@ -98,11 +98,34 @@
         (testing "the agent's branch has the agent's calls and its reply"
           (is (= ["echo agent-1" "echo agent-2"] (map #(get-in % [:call :code]) (:steps agent))))
           (is (= "agent done" (:reply agent))))
-        (testing "the agent branch is a side line: cut from the parent's tip at the start, not merged"
+        (testing "cut from the parent's tip at the start; nobody reacted yet, so it dangles"
           (is (= 1 (count (str/split-lines (git "rev-list" "--merges" "proj")))))
+          (is (= 2 (count (str/split (git "log" "-1" "--format=%P" "proj") #" "))))
           (is (not= (get tips "proj-p00") (get tips "proj-p00-aab12")))
           (is (= ["00"] (r/prompt-nos tips "proj"))))
         (testing "every event keeps its raw payload as a note"
           (let [c (get tips "proj-p00-aab12")]
             (is (str/includes? (git "notes" "--ref=event" "show" c) "agent done"))))
         (is (empty? (r/live-branches)))))))
+
+(deftest agent-merged-where-the-parent-reacts
+  (let [proj (fresh!)]
+    (binding [g/*repo* (str (fs/path scratch "traces4"))]
+      (ev "prompt" {"session_id" "s1" "cwd" proj "prompt" "go"})
+      (ev "subagent-start" {"session_id" "s1" "cwd" proj "agent_id" "late" "agent_type" "x"})
+      (ev "subagent-start" {"session_id" "s1" "cwd" proj "agent_id" "early" "agent_type" "x"})
+      (ev "subagent-stop" {"session_id" "s1" "agent_id" "early" "last_assistant_message" "e"})
+      (testing "an agent that stops while the parent's prompt is open is merged with that prompt"
+        (ev "stop" {"session_id" "s1" "last_assistant_message" "parent done"})
+        (let [tips (r/tips)]
+          (is (= [(get tips "proj-p00") (get tips "proj-p00-aearly")]
+                 (rest (str/split (git "log" "-1" "--format=%P" "proj") #" "))))))
+      (testing "an agent that stops while the parent is idle is merged by the prompt its notification opens"
+        (ev "subagent-stop" {"session_id" "s1" "agent_id" "late" "last_assistant_message" "l"})
+        (is (= 3 (count (str/split (git "log" "-1" "--format=%P" "proj") #" "))) "not merged yet")
+        (ev "prompt" {"session_id" "s1" "cwd" proj
+                      "prompt" "<task-notification>\n<task-id>late</task-id>\n</task-notification>"})
+        (ev "stop" {"session_id" "s1" "last_assistant_message" "saw it"})
+        (let [tips (r/tips)]
+          (is (= [(get tips "proj-p01") (get tips "proj-p00-alate")]
+                 (rest (str/split (git "log" "-1" "--format=%P" "proj") #" ")))))))))
