@@ -3,8 +3,9 @@
 
   bb trace:raw                     projects: prompts, last activity
   bb trace:raw <project>           its prompts: when, steps by kind, the prompt
-  bb trace:raw <project> <NN> [-v] one prompt, every step: command, error, and
-                                   with -v also output and diff; then the reply
+  bb trace:raw <project> <id> [-v] one prompt (an id of the list above, a prefix will do),
+                                   every step: command, error, and with -v also output
+                                   and diff; then the reply
   $TRACE_REPO picks another trace repo (a bench one: <project> is lame, sane, ...)."
   (:require [clojure.string :as str]
             [trace.git :as g :refer [git cat-batch]]
@@ -36,15 +37,16 @@
   (let [live (r/live-branches)]
     (doseq [d (r/all-prompts tips m)]
       (println (format "%s  %s  %s%s  %s" (:nn d) (stamp (:t0 d)) (counts (:steps d))
-                       (if (live (str m "-p" (:nn d))) "  RUNNING" "") (clip (:prompt d) 80))))))
+                       (if (live (:nn d)) "  RUNNING" "") (clip (:prompt d) 80))))))
 
 (defn- prompt [tips m nn verbose?]
-  (let [d (r/prompt-data tips m nn)]
+  (let [id (some #(when (str/starts-with? % nn) %) (r/prompt-nos tips m))
+        d (when id (r/prompt-data tips m id))]
     (when-not d (println "no prompt" nn "in" m) (System/exit 1))
     (println (str "=== " m " prompt " nn "  " (stamp (:t0 d)) (when (:cwd d) (str "  in " (:cwd d)))))
     (println (indent (:prompt d)))
     (println (str "--- " (counts (:steps d))))
-    (let [outs (when verbose? (cat-batch (keep #(when (:result %) (str (:sha %) ":" (:result %))) (:steps d))))]
+    (let [outs (when verbose? (cat-batch (keep :result (:steps d))))]
       (doseq [s (:steps d)]
         (println)
         (println (format "#%d %s %s  +%ds%s%s" (:i s) (kind s) (or (:tool (:call s)) "")
@@ -54,11 +56,11 @@
         (println (indent (:cmd s)))
         (when (string? (:err s)) (println "  error:") (println (indent (:err s))))
         (when verbose?
-          (when-let [o (get outs (str (:sha s) ":" (:result s)))]
+          (when-let [o (get outs (:result s))]
             (println "  output:") (println (indent (strip-ansi o))))
           (when (seq (:files s))
             (println "  diff:")
-            (println (indent (git "show" "--format=" "--patch" (:sha s) "--" "." ":(exclude)reads" ":(exclude)doto.md")))))))
+            (println (indent (git "show" "--format=" "--patch" (:sha s) "--" "." ":(exclude).claude-trace")))))))
     (println)
     (println "=== reply")
     (println (indent (or (:reply d) "(none yet)")))))
@@ -68,6 +70,6 @@
         [m nn] (remove #{"-v"} args)
         tips (r/tips)]
     (cond
-      nn (prompt tips m (if (= 1 (count nn)) (str "0" nn) nn) verbose?)
+      nn (prompt tips m nn verbose?)
       m (prompts tips m)
       :else (projects tips))))
