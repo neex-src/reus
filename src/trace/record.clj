@@ -383,12 +383,24 @@
   (when (= "SessionEnd" hook_event_name)
     (doseq [a (agent-states-of session_id)] (close! (agent-key a) "" false))))
 
+(defn- recorded?
+  "Will this event make a commit? Read-only and cheap, so the probe (which may wait) is only paid for those."
+  [event {:strs [session_id agent_id cwd]}]
+  (boolean
+   (case event
+     "tool" (state (if agent_id (agent-key agent_id) session_id))
+     "prompt" (project-of cwd)
+     "stop" (state session_id)
+     "subagent-start" (or (state session_id) (last-prompt session_id))
+     "subagent-stop" (and agent_id (state (agent-key agent_id)))
+     nil)))
+
 (defn handle!
   "Handle one hook event; raw is its stdin as received (default: the parsed input re-encoded)."
   [event input & [raw]]
   (ensure-repo!)
   (binding [*raw* (or raw (json/generate-string input))
-            *probed* (when *probe?* (probe/measure event input))]
+            *probed* (when (and *probe?* (recorded? event input)) (probe/measure event input))]
     (with-lock
       #(case event
          "prompt" (on-prompt input)

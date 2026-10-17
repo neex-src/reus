@@ -100,3 +100,15 @@
     (is (true? (:found? (probe/measure "tool" {"tool_use_id" "toolu_old" "transcript_path" tr})))
         "outside the first window, found by the widened last look")
     (is (nil? (:found? (probe/measure "stop" {"transcript_path" tr}))) "nothing to look for")))
+
+(deftest untraced-is-not-probed
+  (let [proj (fresh!) tr (str (fs/path scratch "u.jsonl"))
+        t0 (System/currentTimeMillis)]
+    (spit tr "")
+    (binding [g/*repo* (str (fs/path scratch "traces4"))]
+      (ev "prompt" {"session_id" "u" "cwd" "/etc" "prompt" "x" "transcript_path" tr} "{}")
+      (ev "tool" {"session_id" "nobody" "cwd" proj "tool_name" "Bash" "tool_use_id" "t" "transcript_path" tr
+                  "tool_input" {"command" "ls"}} "{}")
+      (ev "stop" {"session_id" "nobody" "last_assistant_message" "x" "transcript_path" tr} "{}")
+      (is (< (- (System/currentTimeMillis) t0) 400) "no 500 ms wait for events that record nothing")
+      (is (= "" (git "for-each-ref" "refs/notes"))))))
