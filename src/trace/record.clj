@@ -49,146 +49,84 @@
   .git/trace-sessions/<session id>. Errors go to .git/trace-errors.log; the hook
   always exits 0, so tracing never breaks a session.
 
-  trace.replay feeds old transcripts through the same handlers: *local* / *orig* then
-  lead a session's paths into a shadow of the project as it was (trace.shadow)."
+  trace.replay feeds old transcripts through the same handlers, with a batch store and the
+  disk as it was then (trace.shadow): every read or write of the trace repo goes through a
+  trace.store, every look at the machine through a trace.disk."
   (:require [babashka.fs :as fs]
-            [babashka.process :as p]
             [cheshire.core :as json]
-            [clojure.edn :as edn]
             [clojure.java.io :as io]
             [clojure.string :as str]
             [trace.agents :as agents]
-            [trace.git :as g :refer [git]]
-            [trace.probe :as probe]))
+            [trace.disk :as disk]
+            [trace.git :as g]
+            [trace.probe :as probe]
+            [trace.store :as store]))
 
 (def delim "--- error ---")
 
-(def ^:dynamic *local*
-  "Path as a session named it -> where it is on disk now. Identity, except in a replay,
-  where a session's paths lead into a shadow checkout of how the project was then."
-  identity)
-
-(def ^:dynamic *orig*
-  "The inverse of *local*: a disk path -> the path as the session knew it."
-  identity)
 (def edit-tools #{"Edit" "MultiEdit" "Write" "NotebookEdit" "file_edit" "file_write" "clojure_edit" "clojure_edit_replace_sexp"})
 (def read-tools #{"Read" "NotebookRead" "read_file"})
+
+(def ^:dynamic *probe?* "Measure the transcript at hook time (the live hook; not a replay)." false)
+
+(def notes-ref "refs/notes/event")
+(def probe-ref "refs/notes/probe")
+
+;; x is the context of one event: {:s store :d disk :raw payload as received :probed probe}
 
 (defn- gitdir [& more] (str (apply fs/path g/*repo* ".git" more)))
 (defn- clip [s n] (let [s (str/replace (str s) #"\s+" " ")] (if (> (count s) n) (str (subs s 0 n) "...") s)))
 (defn- first-line [s n] (clip (first (str/split-lines (str s))) n))
 (defn- short-tool [t] (str/replace (str t) #"^mcp__.*__" ""))
 
-;; --- repo plumbing ----------------------------------------------------------
+;; --- the store, by branch -----------------------------------------------------------
 
-(defn ensure-repo! []
-  (when-not (fs/exists? (gitdir))
-    (fs/create-dirs g/*repo*)
-    (git "init" "-q" "-b" "_" {:dir g/*repo*})
-    (fs/create-dirs (gitdir "trace-sessions"))))
+(defn ensure-repo! [] (store/ensure! (store/live g/*repo*)))
 
-(defn- with-lock [f]
-  (let [lock (gitdir "trace.lock")]
-    (loop [n 0]
-      (if (try (fs/create-dir lock) true (catch Exception _ false))
-        (try (f) (finally (fs/delete-tree lock)))
-        (if (< n 300)
-          (do (Thread/sleep 50) (recur (inc n)))
-          ;; a lock this old is a crashed hook's; take it over
-          (do (fs/delete-tree lock) (recur 0)))))))
-
-(defn- tip [ref]
-  (let [r (g/git* {} "rev-parse" "--verify" "-q" (if (str/starts-with? ref "refs/") ref (str "refs/heads/" ref)))]
-    (when (zero? (:exit r)) (str/trim (:out r)))))
-
-(defn- blob! [content] (git "hash-object" "-w" "--stdin" {:in (str content)}))
+(defn- tip [x ref] (store/tip (:s x) (if (str/starts-with? ref "refs/") ref (str "refs/heads/" ref))))
+(defn- advance! [x branch sha] (store/advance! (:s x) (str "refs/heads/" branch) sha))
+(defn- has? [x rev path] (store/has? (:s x) rev path))
 
 (defn- commit!
   "A commit on top of parent whose tree is parent's plus files {path content};
-  merge-parent makes it a merge. Returns its sha."
-  [parent files subject body & [merge-parent]]
-  (let [env {:extra-env {"GIT_INDEX_FILE" (gitdir "trace-index")}}]
-    (if parent (git "read-tree" parent env) (git "read-tree" "--empty" env))
-    (doseq [[path content] files]
-      (git "update-index" "--add" "--cacheinfo" (str "100644," (blob! content) "," path) env))
-    (apply git "commit-tree" (git "write-tree" env)
-           (concat (mapcat #(vector "-p" %) (remove nil? [parent merge-parent]))
-                   ["-m" subject] (when-not (str/blank? body) ["-m" body])))))
-
-(def ^:dynamic *raw* "The hook stdin of the event being handled, as received." nil)
-(def ^:dynamic *probe?* "Measure the transcript at hook time (the live hook; not a replay)." false)
-(def ^:dynamic *probed* "The probe of the event being handled." nil)
-
-(def notes-ref "refs/notes/event")
-(def probe-ref "refs/notes/probe")
-
-(defn- add-note!
-  "Note content on commit sha in ref (notes tree built like commit!)."
-  [ref sha content]
-  (let [env {:extra-env {"GIT_INDEX_FILE" (gitdir "trace-index")}}
-        parent (tip ref)]
-    (if parent (git "read-tree" parent env) (git "read-tree" "--empty" env))
-    (git "update-index" "--add" "--cacheinfo" (str "100644," (blob! content) "," sha) env)
-    (git "update-ref" ref
-         (apply git "commit-tree" (git "write-tree" env)
-                (concat (when parent ["-p" parent]) ["-m" (last (str/split ref #"/"))])))))
+  merge-parent makes it a merge. Returns its id."
+  [x parent files subject body & [merge-parent]]
+  (store/commit! (:s x) {:parents (vec (remove nil? [parent merge-parent])) :base parent
+                         :files files :subject subject :body body}))
 
 (defn- note!
   "Keep the event's raw payload (and its probe) as notes on commit sha."
-  [sha]
-  (when *raw*
-    (add-note! notes-ref sha *raw*)
-    (when *probed* (add-note! probe-ref sha (pr-str *probed*)))))
-
-(defn- advance! [branch sha] (git "update-ref" (str "refs/heads/" branch) sha))
-(defn- has? [rev path] (zero? (:exit (g/git* {} "cat-file" "-e" (str rev ":" path)))))
+  [x sha]
+  (when (:raw x)
+    (store/note! (:s x) notes-ref sha (:raw x))
+    (when (:probed x) (store/note! (:s x) probe-ref sha (pr-str (:probed x))))))
 
 ;; --- sessions -----------------------------------------------------------------
 
-(defn- state-file [sid] (gitdir "trace-sessions" (str/replace (str sid) #"[^A-Za-z0-9._-]" "_")))
-(defn- state [sid] (let [f (state-file sid)] (when (fs/exists? f) (edn/read-string (slurp f)))))
-(defn- state! [sid m]
-  (let [f (state-file sid)]
-    (if m (do (fs/create-dirs (fs/parent f)) (spit f (pr-str m))) (fs/delete-if-exists f))))
+(defn- state [x sid] (store/kv (:s x) :sessions sid))
+(defn- state! [x sid m] (store/kv! (:s x) :sessions sid m))
 
-(defn- last-file [sid] (gitdir "trace-last" (str/replace (str sid) #"[^A-Za-z0-9._-]" "_")))
 (defn- last-prompt
   "The session's most recent prompt {:project :branch :nn :root}, open or not."
-  [sid]
-  (let [f (last-file sid)] (when (fs/exists? f) (edn/read-string (slurp f)))))
+  [x sid] (store/kv (:s x) :last sid))
 
 (defn- agent-key [agent-id] (str "agent-" agent-id))
 
-(defn- pending-file [agent-id] (gitdir "trace-pending" (str/replace (str agent-id) #"[^A-Za-z0-9._-]" "_")))
 (defn- pending!
   "A finished agent whose parent was idle: its tip waits for the prompt that reacts to its notification."
-  [agent-id m] (let [f (pending-file agent-id)] (fs/create-dirs (fs/parent f)) (spit f (pr-str m))))
-(defn- take-pending! [agent-id]
-  (let [f (pending-file agent-id)]
-    (when (fs/exists? f) (let [m (edn/read-string (slurp f))] (fs/delete f) (:tip m)))))
+  [x agent-id m] (store/kv! (:s x) :pending agent-id m))
+(defn- take-pending! [x agent-id]
+  (when-let [m (store/kv (:s x) :pending agent-id)]
+    (store/kv! (:s x) :pending agent-id nil)
+    (:tip m)))
 
 (defn project-of
   "{:project name :root dir} for a session cwd, or nil when it is not traced."
-  [cwd]
-  (when (and cwd (fs/directory? (*local* cwd)))
-    (let [disk (str (fs/canonicalize (*local* cwd)))
-          cwd (*orig* disk)
-          r (p/shell {:out :string :err :string :continue true :dir disk}
-                     "git" "rev-parse" "--path-format=absolute" "--git-common-dir" "--show-toplevel")
-          projects (str (fs/path (fs/home) "projects"))
-          clean #(str/replace % #"[^A-Za-z0-9._-]" "_")]
-      (cond
-        (str/starts-with? (str disk "/") (str (fs/canonicalize (fs/create-dirs g/*repo*)) "/")) nil
-        (zero? (:exit r))
-        (let [[common top] (map *orig* (str/split-lines (str/trim (:out r))))
-              home (if (= ".git" (str (fs/file-name common))) (fs/parent common) top)]
-          {:project (clean (str (fs/file-name home))) :root top})
-        :else
-        (when-let [[_ n] (re-find (re-pattern (str "^\\Q" projects "\\E/([^/]+)")) cwd)]
-          {:project (clean n) :root (str (fs/path projects n))})))))
+  ([cwd] (project-of (disk/live g/*repo*) cwd))
+  ([d cwd] (disk/project-of d cwd)))
 
-(defn- next-n [project]
-  (let [names (str/split-lines (git "for-each-ref" "--format=%(refname:short)" (str "refs/heads/" project "-p*")))]
+(defn- next-n [x project]
+  (let [names (store/refs (:s x) (str "refs/heads/" project "-p"))]
     (inc (reduce max -1 (keep #(some-> (re-find #"-p(\d+)$" %) second parse-long) names)))))
 
 ;; --- what a tool call did -------------------------------------------------------
@@ -221,13 +159,9 @@
   "The one existing regular file this call is about: its file_path/path/notebook_path,
   else the one existing file of the root a shell command names. Canonical, as the
   session knew it."
-  [root {:strs [tool_input cwd]}]
+  [x root {:strs [tool_input cwd]}]
   (let [resolve (fn [tok]
-                  (let [tok (str/replace (str tok) #"^['\"]|['\"]$" "")
-                        f (cond (str/blank? tok) nil
-                                (fs/absolute? tok) (*local* tok)
-                                :else (some #(let [c (str (fs/path (*local* %) tok))] (when (fs/exists? c) c)) [(or cwd root) root]))]
-                    (when (and f (fs/regular-file? f)) (*orig* (str (fs/canonicalize f))))))]
+                  (disk/resolve-file (:d x) (str/replace (str tok) #"^['\"]|['\"]$" "") [(or cwd root) root]))]
     (if-let [fp (some #(get tool_input %) ["file_path" "path" "notebook_path"])]
       (resolve fp)
       (when-let [cmd (get tool_input "command")]
@@ -237,7 +171,7 @@
 
 (defn- before-edit
   "The file as it was before this edit, as well as can be told after it."
-  [root rel now {:strs [tool_name tool_input]}]
+  [x root rel now {:strs [tool_name tool_input]}]
   (let [undo (fn [s {:strs [old_string new_string replace_all]}]
                (cond (or (nil? new_string) (nil? old_string)) s
                      replace_all (str/replace s new_string old_string)
@@ -245,8 +179,7 @@
     (case (short-tool tool_name)
       "Edit" (undo now tool_input)
       "MultiEdit" (reduce undo now (reverse (get tool_input "edits")))
-      (let [r (p/shell {:out :string :err :string :continue true :dir (*local* root)} "git" "show" (str "HEAD:" rel))]
-        (if (zero? (:exit r)) (:out r) "")))))
+      (disk/head-content (:d x) root rel))))
 
 ;; --- events -----------------------------------------------------------------------
 
@@ -266,69 +199,68 @@
 (defn- close!
   "Reply to the open prompt of key (a session id, or an agent's key) and merge it into
   its project (--no-ff: the merge's tree is the prompt's). An agent's branch is not merged."
-  [key reply & [note?]]
-  (when-let [{:keys [project branch nn subject agent merge]} (state key)]
-    (when-let [t (tip branch)]
-      (let [r (commit! t {"doto.md" reply} (str "response " nn) "")]
-        (advance! branch r)
-        (when note? (note! r))
+  [x key reply & [note?]]
+  (when-let [{:keys [project branch nn subject agent merge]} (state x key)]
+    (when-let [t (tip x branch)]
+      (let [r (commit! x t {"doto.md" reply} (str "response " nn) "")]
+        (advance! x branch r)
+        (when note? (note! x r))
         (when-not agent
           ;; finished agents whose notification this prompt reacted to are merged with it
-          (advance! project (apply git "commit-tree" (str r "^{tree}") "-p" (tip project) "-p" r
-                                   (concat (mapcat #(vector "-p" %) merge) ["-m" subject]))))))
-    (state! key nil)))
+          (advance! x project (store/commit! (:s x) {:parents (into [(tip x project) r] merge) :base r
+                                                     :files {} :subject subject})))))
+    (state! x key nil)))
 
-(defn on-prompt [{:strs [session_id prompt cwd]}]
-  (close! session_id "")
-  (when-let [{:keys [project root]} (project-of cwd)]
-    (when-not (tip project)
-      (advance! project (commit! nil {} (str "trace of " project) (str "root " root))))
-    (let [nn (format "%02d" (next-n project))
+(defn on-prompt [x {:strs [session_id prompt cwd]}]
+  (close! x session_id "")
+  (when-let [{:keys [project root]} (disk/project-of (:d x) cwd)]
+    (when-not (tip x project)
+      (advance! x project (commit! x nil {} (str "trace of " project) (str "root " root))))
+    (let [nn (format "%02d" (next-n x project))
           branch (str project "-p" nn)
           subject (str "prompt " nn ": " (clip prompt 100))
-          c (commit! (tip project) {"doto.md" prompt} subject
+          c (commit! x (tip x project) {"doto.md" prompt} subject
                      (str "session " session_id "\ncwd " cwd "\nroot " root))]
-      (advance! branch c)
-      (note! c)
-      (when-let [f (last-file session_id)]
-        (fs/create-dirs (fs/parent f))
-        (spit f (pr-str {:project project :branch branch :nn nn :root root})))
-      (state! session_id {:project project :branch branch :nn nn :root root :k 0 :subject subject
-                          :merge (vec (keep take-pending! (map second (re-seq #"<task-id>([A-Za-z0-9]+)</task-id>" (str prompt)))))}))))
+      (advance! x branch c)
+      (note! x c)
+      (store/kv! (:s x) :last session_id {:project project :branch branch :nn nn :root root})
+      (state! x session_id {:project project :branch branch :nn nn :root root :k 0 :subject subject
+                            :merge (vec (keep #(take-pending! x %) (map second (re-seq #"<task-id>([A-Za-z0-9]+)</task-id>" (str prompt)))))}))))
 
-(defn on-tool [{:strs [session_id agent_id tool_name tool_input hook_event_name] :as in}]
+(defn on-tool [x {:strs [session_id agent_id tool_name tool_input hook_event_name] :as in}]
   (let [key (if agent_id (agent-key agent_id) session_id)]
-   (when-let [{:keys [branch nn root k] :as st} (state key)]
-    (when-let [t (tip branch)]
+   (when-let [{:keys [branch nn root k] :as st} (state x key)]
+    (when-let [t (tip x branch)]
       (let [k (inc k)
             tool (short-tool tool_name)
             cmd (command-of in)
             text (text-of (get in "tool_response"))
             text (if (= hook_event_name "PostToolUseFailure") (or (get in "error") text) text)
             bad? (failed? in text)
-            file (the-file root in)
+            file (the-file x root in)
             rel (some->> file (rel-of root))
-            agent (when-let [a (get in "agent_type")] (str "\n\nagent " a))
+            agent (when-let [a (get in "agent_type")] (str "\n\n" "agent " a))
+            bytes-of-file #(or (disk/file-bytes (:d x) file) (byte-array 0))
             c (cond
                 (and file (edit-tools tool) (not bad?))
-                (let [now (slurp (*local* file))
+                (let [now (String. ^bytes (bytes-of-file) "UTF-8")
                       path (str "files/" rel)
-                      t (if (has? t path)
+                      t (if (has? x t path)
                           t
-                          (commit! t {path (before-edit root rel now in)} (str "baseline " rel)
+                          (commit! x t {path (before-edit x root rel now in)} (str "baseline " rel)
                                    "the file before its first traced edit"))]
-                  (commit! t {path now} (str tool ": " (first-line rel 90)) (str cmd agent)))
+                  (commit! x t {path now} (str tool ": " (first-line rel 90)) (str cmd agent)))
 
                 (and file (or (read-tools tool) (get tool_input "command")))
-                (commit! t {(str "reads/" rel) (if bad? (str delim "\n" text) text)}
-                         (git "hash-object" "-w" (*local* file)) (str cmd agent))
+                (commit! x t {(str "reads/" rel) (if bad? (str delim "\n" text) text)}
+                         (store/blob! (:s x) (bytes-of-file)) (str cmd agent))
 
                 :else
-                (commit! t {(format "reads/_cmd/%s.%d" nn k) (if bad? (str delim "\n" text) text)}
+                (commit! x t {(format "reads/_cmd/%s.%d" nn k) (if bad? (str delim "\n" text) text)}
                          (format "%s.%d" nn k) (str cmd agent)))]
-        (advance! branch c)
-        (note! c)
-        (state! key (assoc st :k k)))))))
+        (advance! x branch c)
+        (note! x c)
+        (state! x key (assoc st :k k)))))))
 
 ;; --- subagents ----------------------------------------------------------------------
 
@@ -343,86 +275,88 @@
           "")
       (if (< n 10) (do (Thread/sleep 100) (recur (inc n))) ""))))
 
-(defn on-subagent-start [{:strs [session_id agent_id agent_type cwd]}]
-  (when-let [{:keys [project branch nn root]} (or (state session_id) (last-prompt session_id))]
-    (when-let [t (and agent_id (tip branch))]
+(defn on-subagent-start [x {:strs [session_id agent_id agent_type cwd]}]
+  (when-let [{:keys [project branch nn root]} (or (state x session_id) (last-prompt x session_id))]
+    (when-let [t (and agent_id (tip x branch))]
       (let [anid (str nn "-a" agent_id)
             ab (str project "-p" anid)
             brief (agent-brief session_id agent_id)
             subject (str "prompt " anid ": " (clip (str agent_type ": " (first-line brief 80)) 100))
-            c (commit! t {"doto.md" brief} subject
+            c (commit! x t {"doto.md" brief} subject
                        (str "session " session_id "\ncwd " cwd "\nroot " root "\nagent " agent_type
                             "\nagent_id " agent_id "\nparent " branch))]
-        (advance! ab c)
-        (note! c)
-        (state! (agent-key agent_id) {:project project :branch ab :nn anid :root root :k 0 :subject subject
+        (advance! x ab c)
+        (note! x c)
+        (state! x (agent-key agent_id) {:project project :branch ab :nn anid :root root :k 0 :subject subject
                                       :agent true :session session_id})))))
 
 (defn on-subagent-stop
   "Close the agent's branch. Its tip is merged where the parent reacts to the agent's
   notification: into the parent's prompt when one is open (the notification is delivered
   into that turn), else into the prompt that is opened by the notification."
-  [{:strs [session_id agent_id last_assistant_message]}]
+  [x {:strs [session_id agent_id last_assistant_message]}]
   (when agent_id
-    (let [b (:branch (state (agent-key agent_id)))]
-      (close! (agent-key agent_id) (or last_assistant_message "") true)
-      (when-let [t (and b (tip b))]
-        (if-let [st (state session_id)]
-          (state! session_id (update st :merge (fnil conj []) t))
-          (pending! agent_id {:tip t :session session_id}))))))
+    (let [b (:branch (state x (agent-key agent_id)))]
+      (close! x (agent-key agent_id) (or last_assistant_message "") true)
+      (when-let [t (and b (tip x b))]
+        (if-let [st (state x session_id)]
+          (state! x session_id (update st :merge (fnil conj []) t))
+          (pending! x agent_id {:tip t :session session_id}))))))
 
-(defn- agent-states-of [session-id]
-  (let [d (gitdir "trace-sessions")]
-    (when (fs/exists? d)
-      (keep #(let [st (try (edn/read-string (slurp (str %))) (catch Exception _ nil))]
-               (when (and (:agent st) (= session-id (:session st))) (str/replace (str (fs/file-name %)) #"^agent-" "")))
-            (fs/list-dir d)))))
+(defn- agent-states-of [x session-id]
+  (keep (fn [[k st]]
+          (when (and (:agent st) (= session-id (:session st))) (str/replace k #"^agent-" "")))
+        (store/kv-all (:s x) :sessions)))
 
-(defn on-stop [{:strs [session_id hook_event_name] :as in}]
-  (close! session_id (reply-of in) true)
+(defn on-stop [x {:strs [session_id hook_event_name] :as in}]
+  (close! x session_id (reply-of in) true)
   (when (= "SessionEnd" hook_event_name)
-    (doseq [a (agent-states-of session_id)] (close! (agent-key a) "" false))))
-
-(defn- prev-file [key] (gitdir "trace-prev" (str/replace (str key) #"[^A-Za-z0-9._-]" "_")))
+    (doseq [a (agent-states-of x session_id)] (close! x (agent-key a) "" false))))
 
 (defn- probe-event
   "The probe of an event to be recorded. A tool event also gets the previous tool call of its
   transcript looked up, and becomes the previous one."
-  [event {:strs [session_id agent_id tool_use_id] :as input}]
+  [x event {:strs [session_id agent_id tool_use_id] :as input}]
   (if (= event "tool")
-    (let [f (prev-file (if agent_id (agent-key agent_id) session_id))
-          prev (when (fs/exists? f) (slurp f))
-          m (probe/measure event input prev)]
-      (when-not (str/blank? tool_use_id) (fs/create-dirs (fs/parent f)) (spit f tool_use_id))
+    (let [k (if agent_id (agent-key agent_id) session_id)
+          m (probe/measure event input (store/kv (:s x) :prev k))]
+      (when-not (str/blank? tool_use_id) (store/kv! (:s x) :prev k tool_use_id))
       m)
     (probe/measure event input)))
 
 (defn- recorded?
   "Will this event make a commit? Read-only and cheap, so the probe (which may wait) is only paid for those."
-  [event {:strs [session_id agent_id cwd]}]
+  [x event {:strs [session_id agent_id cwd]}]
   (boolean
    (case event
-     "tool" (state (if agent_id (agent-key agent_id) session_id))
-     "prompt" (project-of cwd)
-     "stop" (state session_id)
-     "subagent-start" (or (state session_id) (last-prompt session_id))
-     "subagent-stop" (and agent_id (state (agent-key agent_id)))
+     "tool" (state x (if agent_id (agent-key agent_id) session_id))
+     "prompt" (disk/project-of (:d x) cwd)
+     "stop" (state x session_id)
+     "subagent-start" (or (state x session_id) (last-prompt x session_id))
+     "subagent-stop" (and agent_id (state x (agent-key agent_id)))
      nil)))
 
+(defn handle-in!
+  "Handle one hook event in context x ({:s store :d disk :probe? bool}); raw is its stdin as
+  received (default: the parsed input re-encoded)."
+  [x event input & [raw]]
+  (store/ensure! (:s x))
+  (let [x (assoc x :raw (or raw (json/generate-string input)))
+        x (assoc x :probed (when (and (:probe? x) (recorded? x event input)) (probe-event x event input)))]
+    (store/locked
+     (:s x)
+     #(case event
+        "prompt" (on-prompt x input)
+        "tool" (on-tool x input)
+        "stop" (on-stop x input)
+        "subagent-start" (on-subagent-start x input)
+        "subagent-stop" (on-subagent-stop x input)
+        nil))))
+
 (defn handle!
-  "Handle one hook event; raw is its stdin as received (default: the parsed input re-encoded)."
+  "Handle one hook event live, in the trace repo g/*repo*."
   [event input & [raw]]
-  (ensure-repo!)
-  (binding [*raw* (or raw (json/generate-string input))
-            *probed* (when (and *probe?* (recorded? event input)) (probe-event event input))]
-    (with-lock
-      #(case event
-         "prompt" (on-prompt input)
-         "tool" (on-tool input)
-         "stop" (on-stop input)
-         "subagent-start" (on-subagent-start input)
-         "subagent-stop" (on-subagent-stop input)
-         nil))))
+  (handle-in! {:s (store/live g/*repo*) :d (disk/live g/*repo*) :probe? *probe?*} event input raw))
 
 (defn -main [& [event]]
   (let [raw (slurp *in*)
