@@ -46,7 +46,10 @@
   commit-tree and moved with update-ref, under one mkdir lock, so concurrent
   sessions cannot disturb each other. The open prompt of a session is
   .git/trace-sessions/<session id>. Errors go to .git/trace-errors.log; the hook
-  always exits 0, so tracing never breaks a session."
+  always exits 0, so tracing never breaks a session.
+
+  trace.replay feeds old transcripts through the same handlers: *local* / *orig* then
+  lead a session's paths into a shadow of the project as it was (trace.shadow)."
   (:require [babashka.fs :as fs]
             [babashka.process :as p]
             [cheshire.core :as json]
@@ -57,6 +60,15 @@
             [trace.git :as g :refer [git]]))
 
 (def delim "--- error ---")
+
+(def ^:dynamic *local*
+  "Path as a session named it -> where it is on disk now. Identity, except in a replay,
+  where a session's paths lead into a shadow checkout of how the project was then."
+  identity)
+
+(def ^:dynamic *orig*
+  "The inverse of *local*: a disk path -> the path as the session knew it."
+  identity)
 (def edit-tools #{"Edit" "MultiEdit" "Write" "NotebookEdit" "file_edit" "file_write" "clojure_edit" "clojure_edit_replace_sexp"})
 (def read-tools #{"Read" "NotebookRead" "read_file"})
 
@@ -147,16 +159,17 @@
 (defn project-of
   "{:project name :root dir} for a session cwd, or nil when it is not traced."
   [cwd]
-  (when (and cwd (fs/directory? cwd))
-    (let [cwd (str (fs/canonicalize cwd))
-          r (p/shell {:out :string :err :string :continue true :dir cwd}
+  (when (and cwd (fs/directory? (*local* cwd)))
+    (let [disk (str (fs/canonicalize (*local* cwd)))
+          cwd (*orig* disk)
+          r (p/shell {:out :string :err :string :continue true :dir disk}
                      "git" "rev-parse" "--path-format=absolute" "--git-common-dir" "--show-toplevel")
           projects (str (fs/path (fs/home) "projects"))
           clean #(str/replace % #"[^A-Za-z0-9._-]" "_")]
       (cond
-        (str/starts-with? (str cwd "/") (str (fs/canonicalize (fs/create-dirs g/*repo*)) "/")) nil
+        (str/starts-with? (str disk "/") (str (fs/canonicalize (fs/create-dirs g/*repo*)) "/")) nil
         (zero? (:exit r))
-        (let [[common top] (str/split-lines (str/trim (:out r)))
+        (let [[common top] (map *orig* (str/split-lines (str/trim (:out r))))
               home (if (= ".git" (str (fs/file-name common))) (fs/parent common) top)]
           {:project (clean (str (fs/file-name home))) :root top})
         :else
@@ -190,19 +203,20 @@
       (str tool_name " " (json/generate-string tool_input))))
 
 (defn- rel-of [root f]
-  (let [c (str (fs/canonicalize f))]
+  (let [c (str f)]
     (if (str/starts-with? c (str root "/")) (subs c (inc (count root))) (str "abs" c))))
 
 (defn- the-file
   "The one existing regular file this call is about: its file_path/path/notebook_path,
-  else the one existing file of the root a shell command names."
+  else the one existing file of the root a shell command names. Canonical, as the
+  session knew it."
   [root {:strs [tool_input cwd]}]
   (let [resolve (fn [tok]
                   (let [tok (str/replace (str tok) #"^['\"]|['\"]$" "")
                         f (cond (str/blank? tok) nil
-                                (fs/absolute? tok) tok
-                                :else (some #(let [c (str (fs/path % tok))] (when (fs/exists? c) c)) [(or cwd root) root]))]
-                    (when (and f (fs/regular-file? f)) (str (fs/canonicalize f)))))]
+                                (fs/absolute? tok) (*local* tok)
+                                :else (some #(let [c (str (fs/path (*local* %) tok))] (when (fs/exists? c) c)) [(or cwd root) root]))]
+                    (when (and f (fs/regular-file? f)) (*orig* (str (fs/canonicalize f))))))]
     (if-let [fp (some #(get tool_input %) ["file_path" "path" "notebook_path"])]
       (resolve fp)
       (when-let [cmd (get tool_input "command")]
@@ -220,7 +234,7 @@
     (case (short-tool tool_name)
       "Edit" (undo now tool_input)
       "MultiEdit" (reduce undo now (reverse (get tool_input "edits")))
-      (let [r (p/shell {:out :string :err :string :continue true :dir root} "git" "show" (str "HEAD:" rel))]
+      (let [r (p/shell {:out :string :err :string :continue true :dir (*local* root)} "git" "show" (str "HEAD:" rel))]
         (if (zero? (:exit r)) (:out r) "")))))
 
 ;; --- events -----------------------------------------------------------------------
@@ -286,7 +300,7 @@
             agent (when-let [a (get in "agent_type")] (str "\n\nagent " a))
             c (cond
                 (and file (edit-tools tool) (not bad?))
-                (let [now (slurp file)
+                (let [now (slurp (*local* file))
                       path (str "files/" rel)
                       t (if (has? t path)
                           t
@@ -296,7 +310,7 @@
 
                 (and file (or (read-tools tool) (get tool_input "command")))
                 (commit! t {(str "reads/" rel) (if bad? (str delim "\n" text) text)}
-                         (git "hash-object" "-w" file) (str cmd agent))
+                         (git "hash-object" "-w" (*local* file)) (str cmd agent))
 
                 :else
                 (commit! t {(format "reads/_cmd/%s.%d" nn k) (if bad? (str delim "\n" text) text)}

@@ -11,12 +11,17 @@
   "The trace repo. $TRACE_REPO, else ~/projects/reus/var/traces."
   (or (System/getenv "TRACE_REPO") default-repo))
 
+(def ^:dynamic *env*
+  "Environment added to every git call (a replay sets GIT_AUTHOR_DATE / GIT_COMMITTER_DATE)."
+  {})
+
 (def ^:private ident ["-c" "user.name=reus-trace" "-c" "user.email=trace@reus.local"])
 
 (defn git*
   "Run git in *repo* with process opts (:in, :extra-env, :dir ...); the full result."
   [opts & args]
-  (apply p/shell (merge {:out :string :err :string :continue true :dir *repo*} opts)
+  (apply p/shell (merge {:out :string :err :string :continue true :dir *repo*}
+                        opts {:extra-env (merge *env* (:extra-env opts))})
          "git" (concat ident args)))
 
 (defn git
