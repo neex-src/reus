@@ -108,7 +108,18 @@
    (when ms [:span.ab.dur (mmss (quot ms 1000))])
    (when running? [:span.running [:i.pulse] "running"])))
 
-(defn- step-view [main nn t0 s session]
+(declare step-view)
+
+(defn- agent-run
+  "The recorded history of a subagent run (its own branch), nested under the Agent step."
+  [tips main nn s session]
+  (when-let [d (and (:agent-id s) (prompt-data tips main (str nn "-a" (:agent-id s))))]
+    [:div.agent-run
+     [:div.reply-h (str "Agent run · " (count (:steps d)) " steps")]
+     [:ol.steps.nested (for [s2 (:steps d)] (step-view main (str nn "-a" (:agent-id s)) (:t0 d) s2 session tips))]
+     (when (:reply d) [:details [:summary "Agent's last message"] [:div.md (:reply d)]])]))
+
+(defn- step-view [main nn t0 s session tips]
   (let [id (str main "-" nn "-" (:i s))
         {:keys [tool code lang]} (:call s)
         agent (when (= "Agent" tool) (agents/info session (:agent-id s) (:input (:call s))))]
@@ -162,6 +173,7 @@
                       (str "/x/show?r=" (enc (str (:sha s) ":" (:result s)))) :kind "text" :open? true)
                 [:div.note "No output recorded."])
          nil)
+       (agent-run tips main nn s session)
        [:div.commit "commit " [:code (subs (:sha s) 0 10)] " · " (:subject s)]]]]))
 
 (defn- note-view
@@ -304,7 +316,7 @@
                  [:h2 main [:small (count steps) " steps · " (mmss (- (:t1 d) t0))]]
                  (tape steps :href-fn #(str "#" main "-" nn "-" (:i %)) :cls "big")
                  (lazy "Net change of this prompt" (str "/x/net?m=" (enc main) "&p=" nn) :kind "diff" :cls "net")
-                 [:ol.steps (for [s steps] (step-view main nn t0 s (:session d)))]
+                 [:ol.steps (for [s steps] (step-view main nn t0 s (:session d) tips))]
                  (when-let [ns (seq (notes-of tips d))]
                    [:div.events
                     [:div.reply-h (str "Background events · " (count ns))]
