@@ -2,36 +2,49 @@
   "Everything trace.record reads or writes in the trace repo, behind one protocol, so the
   live hook and a replay can differ in how, not in what.
 
-  Ids. A ref name is a full one (refs/heads/x); a blob or commit id is whatever the store
-  hands out (a sha live; a fast-import mark in a batch) and is only passed back to it.
-  A commit is {:parents [id...] :base id|nil :files {path content} :subject :body}: its
-  tree is base's plus files, its first parent is parents[0]. Content is a string or bytes.
+  Ids. A ref name is a full one (refs/heads/x); a blob, tree or commit id is whatever the
+  store hands out (a sha live; a fast-import mark in a batch) and is only passed back to it;
+  (sha-of s id) turns a commit id into its sha (a batch asks fast-import for it).
+  A commit is {:parents [id...] :tree T :subject :body [:author :committer]} where the idents
+  are \"Name <mail> epoch +zone\" (default: reus-trace, now / the batch's date) and
+  T = {:base tree-sha|nil :subtrees {dir tree-id} :changes {path content|nil}}: the tree
+  of base, with the trees (tree! s files) made put in at dirs, and files set or (nil) removed.
+  Content is a string or bytes.
 
-  Key/value state (kv): namespaces :sessions :last :pending (edn values) and :prev (a
-  string); a nil value deletes. Live they are the files .git/trace-<ns>/<key>.
+  Key/value state (kv): namespaces :sessions (open prompts), :pending (finished agents),
+  :turn-pending, :mirror (the real main commit mirrored last), :realheads (real commit -> the
+  trace branches that did work with it checked out), :counters (prompts per branch), :tfiles
+  (a session's .claude-trace files), :roots (cwd -> worktree) hold edn; :prev is a string; a
+  nil value deletes. Live they are the files .git/trace-<ns>/<key>.
 
   (live repo)   plumbing and files in the repo, as the hook has always done: commits built
-                with a private index and commit-tree, refs by update-ref, one mkdir lock.
-  (batch repo)  a replay's store: state in memory, objects streamed to one `git fast-import`,
+                with commit-tree, refs by update-ref, one mkdir lock.
+  (batch repo opts)  a replay's store: state in memory, objects streamed to one `git fast-import`,
                 blob shas computed in-process, commits addressed by marks; notes and refs are
-                written by (close! s). (at! s ms) sets the date of what follows."
+                written by (close! s). (at! s ms) sets the date of what follows. opts
+                {:alternates [objects-dir]} are the project repos whose objects the trees use
+                (set before fast-import starts, which cannot learn of them later)."
   (:require [babashka.fs :as fs]
             [babashka.process :as p]
             [clojure.edn :as edn]
             [clojure.string :as str]
             [trace.git :as g :refer [git]])
-  (:import [java.io BufferedOutputStream ByteArrayInputStream OutputStream]
+  (:import [java.io BufferedOutputStream BufferedReader ByteArrayInputStream InputStreamReader OutputStream]
            [java.security MessageDigest]
            [java.time Instant ZoneId]))
+
+(def empty-tree "4b825dc642cb6eb9a060e54bf8d69288fbee4904")
 
 (defprotocol Store
   (ensure! [s] "Create the repo when it is not there.")
   (locked [s f] "Call f holding the store's lock.")
   (tip [s ref] "The id a full ref points to, or nil.")
   (refs [s prefix] "The full names of the refs that start with prefix.")
-  (has? [s rev path] "Does commit rev have path in its tree?")
-  (blob! [s content] "Store content; its id.")
+  (blob! [s content] "Store content; its sha.")
+  (tree! [s files] "Store {path content} as a tree; its id (for :subtrees).")
   (commit! [s c] "Make a commit (see ns); its id.")
+  (sha-of [s id] "The sha of a commit id.")
+  (alternate! [s objects-dir] "Let the repo use the objects of another one.")
   (advance! [s ref id] "Point a full ref at id.")
   (note! [s ref id content] "Keep content as the note of commit id in notes ref.")
   (kv [s ns k] "The value of k in ns, or nil.")
@@ -70,7 +83,7 @@
        {:in (if (bytes? content) (ByteArrayInputStream. content) (str content))}))
 
 (defn- live-add-note [repo ref sha content]
-  (let [env {:extra-env {"GIT_INDEX_FILE" (gitdir repo "trace-index")}}
+  (let [env {:extra-env {"GIT_INDEX_FILE" (gitdir repo "trace-note-index")}}
         parent (live-tip ref)]
     (if parent (git "read-tree" parent env) (git "read-tree" "--empty" env))
     (git "update-index" "--add" "--cacheinfo" (str "100644," (live-blob content) "," sha) env)
@@ -82,6 +95,55 @@
 
 (defn- read-kv [ns f]
   (when (fs/exists? f) (if (raw-ns ns) (slurp f) (edn/read-string (slurp f)))))
+
+(defn- ident-env
+  "GIT_AUTHOR_* / GIT_COMMITTER_* for idents \"Name <mail> epoch +zone\" (nil: the default)."
+  [author committer]
+  (into {} (mapcat (fn [[who s]]
+                     (when-let [[_ n m d] (some->> s (re-matches #"(.*) <(.*)> (\d+ [-+]\d{4})"))]
+                       [[(str "GIT_" who "_NAME") n] [(str "GIT_" who "_EMAIL") m] [(str "GIT_" who "_DATE") d]]))
+                   [["AUTHOR" author] ["COMMITTER" committer]])))
+
+(defn- live-tree
+  "The sha of tree spec T (see ns)."
+  [repo {:keys [base subtrees changes]}]
+  (let [base (or base empty-tree)]
+    (cond
+      (and (empty? subtrees) (empty? changes)) base
+
+      (empty? changes)
+      (let [keep? (set (keys subtrees))
+            ls (remove #(keep? (second (str/split % #"\t" 2)))
+                       (remove str/blank? (str/split (git "ls-tree" "-z" base) #"\u0000")))]
+        (git "mktree" "-z" {:in (str/join (concat (map #(str % "\u0000") ls)
+                                                  (map (fn [[d t]] (str "040000 tree " t "\t" d "\u0000")) subtrees)))}))
+
+      :else
+      (let [env {:extra-env {"GIT_INDEX_FILE" (gitdir repo "trace-index-tmp")}}]
+        (git "read-tree" base env)
+        (doseq [[d t] subtrees] (git "read-tree" (str "--prefix=" d "/") t env))
+        (doseq [[path content] changes]
+          (if (nil? content)
+            (git "update-index" "--force-remove" path env)
+            (git "update-index" "--add" "--cacheinfo" (str "100644," (live-blob content) "," path) env)))
+        (git "write-tree" env)))))
+
+(defn- live-tree!
+  "A tree of {path content}: the blobs hashed in one go, the tree through a private index."
+  [repo files]
+  (let [dir (gitdir repo "trace-tmp")
+        files (vec files)
+        paths (map-indexed (fn [i _] (str (fs/path dir (str i)))) files)
+        env {:extra-env {"GIT_INDEX_FILE" (gitdir repo "trace-index-tmp")}}]
+    (fs/create-dirs dir)
+    (try
+      (doseq [[p [_ c]] (map vector paths files)] (with-open [o (java.io.FileOutputStream. ^String p)] (.write o (bytes-of c))))
+      (let [shas (str/split-lines (git "hash-object" "-w" "--stdin-paths" {:in (str (str/join "\n" paths) "\n")}))]
+        (git "read-tree" "--empty" env)
+        (git "update-index" "--add" "--index-info"
+             (assoc env :in (str/join (map (fn [[path _] sha] (str "100644 " sha "\t" path "\n")) files shas))))
+        (git "write-tree" env))
+      (finally (fs/delete-tree dir)))))
 
 (defrecord Live [repo]
   Store
@@ -101,18 +163,23 @@
             (do (fs/delete-tree lock) (recur 0)))))))
   (tip [_ ref] (in repo (live-tip ref)))
   (refs [_ prefix]
-    (in repo (remove str/blank? (str/split-lines (git "for-each-ref" "--format=%(refname)" (str prefix "*"))))))
-  (has? [_ rev path] (in repo (zero? (:exit (g/git* {} "cat-file" "-e" (str rev ":" path))))))
+    (in repo (filter #(str/starts-with? % prefix)
+                     (remove str/blank? (str/split-lines (git "for-each-ref" "--format=%(refname)" (subs prefix 0 (inc (or (str/last-index-of prefix "/") -1)))))))))
   (blob! [_ content] (in repo (live-blob content)))
-  (commit! [_ {:keys [parents base files subject body]}]
+  (tree! [_ files] (in repo (if (empty? files) empty-tree (live-tree! repo files))))
+  (commit! [_ {:keys [parents tree subject body author committer]}]
     (in repo
-      (let [env {:extra-env {"GIT_INDEX_FILE" (gitdir repo "trace-index")}}]
-        (if base (git "read-tree" base env) (git "read-tree" "--empty" env))
-        (doseq [[path content] files]
-          (git "update-index" "--add" "--cacheinfo" (str "100644," (live-blob content) "," path) env))
-        (apply git "commit-tree" (git "write-tree" env)
-               (concat (mapcat #(vector "-p" %) parents)
-                       ["-m" subject] (when-not (str/blank? body) ["-m" body]))))))
+      (apply git "commit-tree" (live-tree repo tree)
+             (concat (mapcat #(vector "-p" %) parents)
+                     ["-m" subject] (when-not (str/blank? body) ["-m" body])
+                     [{:extra-env (ident-env author committer)}]))))
+  (sha-of [_ id] id)
+  (alternate! [_ dir]
+    (let [f (fs/path (gitdir repo "objects" "info") "alternates")
+          have (when (fs/exists? f) (str/split-lines (slurp (str f))))]
+      (when-not (some #{(str dir)} have)
+        (fs/create-dirs (fs/parent f))
+        (spit (str f) (str (str/join "\n" (concat have [(str dir)])) "\n")))))
   (advance! [_ ref id] (in repo (git "update-ref" ref id)))
   (note! [_ ref id content] (in repo (live-add-note repo ref id content)))
   (kv [_ ns k] (read-kv ns (kv-file repo ns k)))
@@ -174,11 +241,11 @@
           (swap! st assoc-in [:blobs sha] m)
           m))))
 
-(defn- emit-commit! [{:keys [out st]} ref msg parents tree-lines]
+(defn- emit-commit! [{:keys [out st]} ref msg parents tree-lines & [author committer]]
   (let [m (str ":" (:n (swap! st update :n inc)))
         d (:date @st)]
     (w out (str (when (empty? parents) (str "reset " ref "\n")) "commit " ref "\nmark " m "\n"
-                "author " ident " " d "\ncommitter " ident " " d "\n"))
+                "author " (or author (str ident " " d)) "\ncommitter " (or committer (str ident " " d)) "\n"))
     (data out msg)
     (when (seq parents) (w out (str "from " (first parents) "\n")))
     (doseq [p (rest parents)] (w out (str "merge " p "\n")))
@@ -186,26 +253,35 @@
     (w out "\n")
     m))
 
-(defrecord Batch [repo proc out st]
+(defn- file-lines [this prefix files]
+  (for [[path content] files :let [path (str prefix path)] :when (valid-path? path)]
+    (if (nil? content)
+      (str "D " (quote-path path))
+      (str "M 100644 " (emit-blob! this content) " " (quote-path path)))))
+
+(defrecord Batch [repo proc out rd st]
   Store
   (ensure! [_])
   (locked [_ f] (f))
   (tip [_ ref] (get-in @st [:refs ref]))
   (refs [_ prefix] (filter #(str/starts-with? % prefix) (keys (:refs @st))))
-  (has? [_ rev path] (contains? (get-in @st [:trees rev]) path))
   (blob! [this content] (emit-blob! this content) (blob-sha content))
-  (commit! [this {:keys [parents base files subject body]}]
-    (let [tree (get-in @st [:trees base] {})
-          added (into {} (keep (fn [[path content]] (when (valid-path? path) [path (emit-blob! this content)]))) files)
-          tree' (merge tree added)
-          same? (and base (= base (first parents)))
-          m-line (fn [[path mk]] (str "M 100644 " mk " " (quote-path path)))
-          lines (if same? (map m-line added) (cons "deleteall" (map m-line tree')))
+  (tree! [_ files] {::tree files})
+  (commit! [this {:keys [parents tree subject body author committer]}]
+    (let [{:keys [base subtrees changes]} tree
           complete (fn [t] (if (str/ends-with? t "\n") t (str t "\n")))
           msg (str (complete (str subject)) (when-not (str/blank? body) (str "\n" (complete body))))
-          id (emit-commit! this "refs/tmp/fi" msg parents lines)]
-      (swap! st assoc-in [:trees id] tree')
+          lines (doall (concat [(if base (str "M 040000 " base " \"\"") "deleteall")]
+                        (mapcat (fn [[d t]] (file-lines this (str d "/") (::tree t))) subtrees)
+                        (file-lines this "" changes)))]
+      (emit-commit! this "refs/tmp/fi" msg parents lines author committer)))
+  (sha-of [_ id]
+    (if (str/starts-with? (str id) ":")
+      (do (w out (str "get-mark " id "\n"))
+          (.flush ^OutputStream out)
+          (or (.readLine ^BufferedReader rd) (throw (ex-info "git fast-import is gone" {:id id}))))
       id))
+  (alternate! [_ dir] (when-not (some #{(str dir)} (:alternates @st)) (throw (ex-info "a batch store needs its alternates up front" {:dir dir}))))
   (advance! [_ ref id] (swap! st assoc-in [:refs ref] id) nil)
   (note! [this ref id content]
     (emit-blob! this content)
@@ -219,18 +295,22 @@
 
 (defn batch
   "A replay's store for the (new) trace repo; a git fast-import is running until (close! s)."
-  [repo]
+  [repo & [{:keys [alternates]}]]
   (let [repo (str repo)]
     (fs/create-dirs repo)
     (g/git* {:dir repo} "init" "-q" "-b" "_")
+    (when (seq alternates)
+      (fs/create-dirs (fs/path repo ".git" "objects" "info"))
+      (spit (str (fs/path repo ".git" "objects" "info" "alternates")) (str (str/join "\n" alternates) "\n")))
     (let [pb (doto (ProcessBuilder. ["git" "-c" "user.name=reus-trace" "-c" "user.email=trace@reus.local"
                                      "fast-import" "--quiet" "--force" "--date-format=raw" "--done"])
                (.directory (fs/file repo))
-               (.redirectOutput java.lang.ProcessBuilder$Redirect/INHERIT)
                (.redirectError java.lang.ProcessBuilder$Redirect/INHERIT))
           proc (.start pb)]
       (->Batch repo proc (BufferedOutputStream. (.getOutputStream proc) 65536)
-               (atom {:n 0 :refs {} :trees {} :blobs {} :notes {} :kv {} :date (git-date (System/currentTimeMillis))})))))
+               (BufferedReader. (InputStreamReader. (.getInputStream proc)))
+               (atom {:n 0 :refs {} :blobs {} :notes {} :kv {} :alternates (set (map str alternates))
+                      :date (git-date (System/currentTimeMillis))})))))
 
 (defn at! "Date what the batch store writes next (epoch ms)." [s ms]
   (swap! (:st s) assoc :date (git-date ms)) nil)
