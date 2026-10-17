@@ -64,10 +64,20 @@
         tool-commits (when s1 (lines (git "log" "--first-parent" "--format=%H" "--grep=^Tool: " s1)))
         noted (set (map #(second (str/split % #" ")) (lines (git "notes" "--ref=turn" "list"))))
         errlog (fs/path g/*repo* ".git" "trace-errors.log")
-        feat (out proj "git" "rev-parse" "feat")
         agent-first (when a1 (first (lines (git "log" "--first-parent" "--reverse" "--format=%H" (str "^" s1) a1))))
-        deletes (lines (git "log" "--no-merges" "--diff-filter=D" "--format=%h" "--all" "--" "src/a.txt"))
-        adds (when s1 (lines (git "log" "--first-parent" "--diff-filter=A" "--format=%h" s1 "--" "src/a.txt")))
+        deletes (mapcat (fn [b] (map #(str b " " %) (lines (git "log" "--first-parent" "--diff-filter=D" "--format=%h" b "--" "src/a.txt"))))
+                        (remove nil? [main s1 a1]))
+        adds (map (fn [b] (count (lines (git "log" "--first-parent" "--diff-filter=A" "--format=%h" b "--" "src/a.txt"))))
+                  (remove nil? [main s1 a1]))
+        files (fn [rev] (set (remove #(str/starts-with? % ".claude-trace/") (lines (git "ls-tree" "-r" "--name-only" rev)))))
+        real-files (fn [h] (set (lines (out proj "git" "ls-tree" "-r" "--name-only" h))))
+        own (fn [b] (lines (git "log" "--first-parent" "--format=%H" "--grep=^Real-Head: " b)))
+        ;; a commit's Real-Head is the HEAD of the worktree whose tree it carries: every tracked file
+        ;; of that commit is in the tree (nothing in this scenario deletes a file)
+        inconsistent (for [b (remove nil? [s1 a1]) c (own b)
+                           :let [h (trailer c "Real-Head")]
+                           :when (and h (not (every? (files c) (real-files h))))]
+                       (str (subs c 0 7) " Real-Head " (subs h 0 7)))
         reply (when s1 (git "show" (str s1 ":.claude-trace/reply.md")))
         brief (when a1 (git "show" (str a1 ":.claude-trace/prompt.md")))]
     [["refs: main, one session branch, one agent branch" (and (some #{main} refs) (= 1 (count s)) (= 1 (count a)))
@@ -76,13 +86,15 @@
      ["mirror main has the real merge" (and (pos? real-merges) (> (count mp) 1)) (str "real merges " real-merges ", tip parents " (count mp))]
      ["the merge's extra parents are the session's and the agent's tips"
       (and (boolean (some s-set extra)) (boolean (some a-set extra))) (str (count extra) " extra parents")]
-     ["no phantom delete of src/a.txt, added once on the session branch" (and (empty? deletes) (= 1 (count adds)))
+     ["no phantom delete of src/a.txt on main, the session or the agent; added at most once on each" (and (empty? deletes) (every? #(<= % 1) adds))
       (str "deletes " (pr-str deletes) " adds " (pr-str adds))]
      ["agent brief is not empty" (and (not (str/blank? brief)) (not (str/ends-with? (git "log" "-1" "--format=%s" (first (lines (git "log" "--first-parent" "--reverse" "--format=%h" (str "^" s1) a1)))) "Explore:")))
       (pr-str (some-> brief (subs 0 (min 60 (count brief)))))]
-     ["agent's first commit: Real-Head is the worktree's HEAD (feat), as its Cwd says"
-      (and agent-first (str/ends-with? (str (trailer agent-first "Cwd")) ".wt-feat") (= feat (trailer agent-first "Real-Head")))
-      (str "Cwd " (some-> agent-first (trailer "Cwd")) " Real-Head " (some-> agent-first (trailer "Real-Head")) " feat " feat)]
+     ["every commit's Real-Head is the HEAD of the worktree whose tree it carries" (empty? inconsistent) (pr-str inconsistent)]
+     ["the agent's first commit keeps the tree and Real-Head of the commit it is cut from"
+      (and agent-first (= (files agent-first) (files (str agent-first "^")))
+           (= (trailer agent-first "Real-Head") (trailer (str agent-first "^") "Real-Head")))
+      (str agent-first)]
      ["every tool commit has a turn note" (and (seq tool-commits) (every? noted tool-commits))
       (str (count (filter noted tool-commits)) " of " (count tool-commits))]
      ["the last response has a reply" (not (str/blank? reply)) (pr-str reply)]

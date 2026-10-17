@@ -206,6 +206,17 @@
             wt-head (real wt "rev-parse" "HEAD")]
         (is (= wt-head (trailer tool-c "Real-Head")))
         (is (str/includes? (no-trace tool-c) "feature.txt") "a call in the worktree has the worktree's tree")
+        (testing "a call that does not act in a worktree (an Agent call, a web fetch) keeps tree and Real-Head"
+          (ev "tool" {"session_id" "s1" "cwd" proj "tool_name" "Agent" "tool_input" {"prompt" "x"} "tool_response" "ok"})
+          (ev "tool" {"session_id" "s1" "cwd" proj "tool_name" "WebFetch" "tool_input" {"url" "http://x"} "tool_response" "ok"})
+          (is (= (no-trace tool-c) (no-trace "proj/s/s1")))
+          (is (= wt-head (trailer "proj/s/s1" "Real-Head")))
+          (testing "while a shell call in the main checkout switches to its tree"
+            (ev "tool" {"session_id" "s1" "cwd" proj "tool_name" "Bash" "tool_input" {"command" "ls"} "tool_response" "ok"})
+            (is (not (str/includes? (no-trace "proj/s/s1") "feature.txt")))
+            (is (= (real proj "rev-parse" "HEAD") (trailer "proj/s/s1" "Real-Head")))
+            (ev "tool" {"session_id" "s1" "cwd" proj "tool_name" "Write" "tool_input" {"file_path" (str (fs/path wt "feature.txt"))}
+                        "tool_response" "ok"})))
         (ev "stop" {"session_id" "s1" "cwd" proj "last_assistant_message" "ok"})
         (testing "the response, from the main checkout's cwd, keeps the tree of the previous commit"
           (is (= (no-trace tool-c) (no-trace "proj/s/s1")))
