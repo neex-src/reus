@@ -164,6 +164,29 @@
          nil)
        [:div.commit "commit " [:code (subs (:sha s) 0 10)] " · " (:subject s)]]]]))
 
+(defn- note-view
+  "A task notification that reached the session while this prompt was open or after
+  its reply, before the next prompt."
+  [t0 {:keys [at task status summary result]} session]
+  (let [agent (agents/info session task {})]
+    [:li.note-ev {:class (when (= "failed" status) "failed")}
+     [:span.t (str "+" (mmss (- at t0)))]
+     [:span.st status]
+     [:span.lbl (clip summary 200)]
+     (when agent (agent-badges agent))
+     (when-not (str/blank? result)
+       [:details [:summary "result · " (count (str/split-lines result)) " lines"] (code-block result "plaintext")])]))
+
+(defn- notes-of
+  "The session's notifications between this prompt's start and the next prompt of the same session."
+  [tips d]
+  (when-let [session (:session d)]
+    (let [end (->> (all-prompts tips (:main d))
+                   (filter #(and (= session (:session %)) (> (:t0 %) (:t0 d))))
+                   (map :t0) sort first)]
+      (filter #(and (>= (:at %) (:t0 d)) (or (nil? end) (< (:at %) end)))
+              (agents/notifications session)))))
+
 (defn- counts [steps]
   (merge {:read 0 :edit 0 :run 0 :err 0} (frequencies (map #(if (:err %) :err (:kind %)) steps))))
 
@@ -282,6 +305,10 @@
                  (tape steps :href-fn #(str "#" main "-" nn "-" (:i %)) :cls "big")
                  (lazy "Net change of this prompt" (str "/x/net?m=" (enc main) "&p=" nn) :kind "diff" :cls "net")
                  [:ol.steps (for [s steps] (step-view main nn t0 s (:session d)))]
+                 (when-let [ns (seq (notes-of tips d))]
+                   [:div.events
+                    [:div.reply-h (str "Background events · " (count ns))]
+                    [:ol (for [n ns] (note-view t0 n (:session d)))]])
                  [:div.reply
                   [:div.reply-h "Reply"]
                   (if (:reply d)

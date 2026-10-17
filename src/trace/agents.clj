@@ -64,3 +64,29 @@
        :ms (ms-between first last)
        :calls calls
        :running? (boolean (and age (< age 60000)))})))
+
+;; --- task notifications -------------------------------------------------------
+
+(defn- tag [s t] (some-> (re-find (re-pattern (str "(?s)<" t ">(.*?)</" t ">")) s) second str/trim))
+
+(defn- unescape [s] (some-> s (str/replace "&lt;" "<") (str/replace "&gt;" ">") (str/replace "&quot;" "\"") (str/replace "&amp;" "&")))
+
+(defn notifications
+  "The task notifications a session received (a background command or monitor ended,
+  an agent finished): [{:at epoch-secs :task :tool-use :status :summary :result}], in
+  order. They arrive without a prompt, so no hook sees them; the transcript queues each."
+  [session]
+  (when-let [f (and session (first (fs/glob projects-dir (str "*/" session ".jsonl"))))]
+    (with-open [r (io/reader (str f))]
+      (->> (line-seq r)
+           (filter #(and (str/includes? % "\"operation\":\"enqueue\"") (str/includes? % "task-notification>")))
+           (keep #(try (json/parse-string % true) (catch Exception _ nil)))
+           (keep (fn [{:keys [content timestamp]}]
+                   (when (str/includes? (str content) "<task-id>")
+                     {:at (.getEpochSecond (Instant/parse timestamp))
+                      :task (tag content "task-id")
+                      :tool-use (tag content "tool-use-id")
+                      :status (tag content "status")
+                      :summary (unescape (or (tag content "summary") (tag content "event")))
+                      :result (unescape (tag content "result"))})))
+           vec))))
