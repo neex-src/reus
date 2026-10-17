@@ -241,3 +241,10 @@ pre.code code, .diff .dl, .md pre code { white-space: pre-wrap; overflow-wrap: a
 body.split-on .has-split > pre.cmd, body.split-on .has-split > details.lazy[data-kind="text"] { display: none; }
 body:not(.split-on) .split { display: none; }
 @media (max-width: 800px) { .index { min-height: 0; } }
+
+/* subagent steps: model, effort, run time */
+.ab { font: 11.5px var(--mono); padding: 0 6px; border-radius: 9px; border: 1px solid var(--line, currentColor); color: var(--muted); }
+.ab.model { color: var(--run); }
+.ab.effort { color: var(--edit); }
+.ab.dur { color: var(--ink); }
+.agent { display: flex; flex-wrap: wrap; gap: 6px; align-items: baseline; }

@@ -25,6 +25,7 @@
             [hiccup2.core :as h]
             [org.httpkit.server :as srv]
             [trace.git :as g :refer [git]]
+            [trace.agents :as agents]
             [trace.read :refer [tips mains prompt-nos prompt-data all-prompts live-branches ext-lang central?]])
   (:import [java.net URLDecoder URLEncoder]
            [java.time Instant ZoneId]
@@ -62,6 +63,7 @@
     (cond
       (and (= kind :read) read-file (not code)) read-file
       code (first-line code)
+      (= "Agent" tool) (str (get input "description"))
       target (str target (when-let [f (or (get input "form_identifier") (get input "name_pattern") (get input "pattern"))]
                            (str "  ·  " f)))
       (seq files) (str/join ", " (map :path files))
@@ -97,9 +99,19 @@
      (for [k ["content" "new_content" "code"] :let [v (get input k)] :when v]
        [:div.pair [:div.tag k] (code-block v (if (= k "code") "clojure" lang))])]))
 
-(defn- step-view [main nn t0 s]
+(defn- agent-badges
+  "Model, effort and run time of a subagent step."
+  [{:keys [model effort ms running?]}]
+  (list
+   (when model [:span.ab.model (str/replace model #"^claude-" "")])
+   (when effort [:span.ab.effort effort])
+   (when ms [:span.ab.dur (mmss (quot ms 1000))])
+   (when running? [:span.running [:i.pulse] "running"])))
+
+(defn- step-view [main nn t0 s session]
   (let [id (str main "-" nn "-" (:i s))
-        {:keys [tool code lang]} (:call s)]
+        {:keys [tool code lang]} (:call s)
+        agent (when (= "Agent" tool) (agents/info session (:agent-id s) (:input (:call s))))]
     [:li {:id id :class (str "step " (kind-class s)) :data-kind (if (:err s) "err" (name (:kind s)))}
      [:details.step-d
       [:summary
@@ -108,10 +120,17 @@
        [:span.tool tool]
        [:span.lbl (clip (label s) 160)]
        [:span.meta
+        (when agent (agent-badges agent))
         (when (= :edit (:kind s)) [:span.delta [:b.add (str "+" (:add s))] " " [:b.del (str "−" (:del s))]])
         (when (:lines s) [:span.lines (str (:lines s) " lines")])
         [:span.t (str "+" (mmss (- (:at s) t0)))]]]
       [:div.step-body
+       (when agent
+         [:div.agent
+          [:span.ab.type (:type agent)]
+          (agent-badges agent)
+          [:span.ab (str (:calls agent) " tool calls")]
+          [:code.sha (:agent-id s)]])
        (if code
          (code-block code lang "cmd")
          (input-view (:call s)))
@@ -262,7 +281,7 @@
                  [:h2 main [:small (count steps) " steps · " (mmss (- (:t1 d) t0))]]
                  (tape steps :href-fn #(str "#" main "-" nn "-" (:i %)) :cls "big")
                  (lazy "Net change of this prompt" (str "/x/net?m=" (enc main) "&p=" nn) :kind "diff" :cls "net")
-                 [:ol.steps (for [s steps] (step-view main nn t0 s))]
+                 [:ol.steps (for [s steps] (step-view main nn t0 s (:session d)))]
                  [:div.reply
                   [:div.reply-h "Reply"]
                   (if (:reply d)
