@@ -383,6 +383,20 @@
   (when (= "SessionEnd" hook_event_name)
     (doseq [a (agent-states-of session_id)] (close! (agent-key a) "" false))))
 
+(defn- prev-file [key] (gitdir "trace-prev" (str/replace (str key) #"[^A-Za-z0-9._-]" "_")))
+
+(defn- probe-event
+  "The probe of an event to be recorded. A tool event also gets the previous tool call of its
+  transcript looked up, and becomes the previous one."
+  [event {:strs [session_id agent_id tool_use_id] :as input}]
+  (if (= event "tool")
+    (let [f (prev-file (if agent_id (agent-key agent_id) session_id))
+          prev (when (fs/exists? f) (slurp f))
+          m (probe/measure event input prev)]
+      (when-not (str/blank? tool_use_id) (fs/create-dirs (fs/parent f)) (spit f tool_use_id))
+      m)
+    (probe/measure event input)))
+
 (defn- recorded?
   "Will this event make a commit? Read-only and cheap, so the probe (which may wait) is only paid for those."
   [event {:strs [session_id agent_id cwd]}]
@@ -400,7 +414,7 @@
   [event input & [raw]]
   (ensure-repo!)
   (binding [*raw* (or raw (json/generate-string input))
-            *probed* (when (and *probe?* (recorded? event input)) (probe/measure event input))]
+            *probed* (when (and *probe?* (recorded? event input)) (probe-event event input))]
     (with-lock
       #(case event
          "prompt" (on-prompt input)

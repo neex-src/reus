@@ -99,10 +99,15 @@
                                   (find (:lines (tail-lines file (second windows))))))})
     {}))
 
-(defn measure [event in]
+(defn measure
+  "The probe of an event. A tool event is looked at once (Claude Code writes its tool_result
+  only after the hooks return); prev-id, the tool_use_id of the previous recorded tool event
+  of the same transcript, is looked for too: :previous-found? (nil when there is none)."
+  [event in & [prev-id]]
   (try
     (let [t0 (System/currentTimeMillis)
-          ms #(- (System/currentTimeMillis) t0)]
+          ms #(- (System/currentTimeMillis) t0)
+          looks (if (= event "tool") [0] looks)]
       (loop [[at & more] looks first-look nil]
         (let [wait (- at (ms))
               _ (when (pos? wait) (Thread/sleep wait))
@@ -114,7 +119,10 @@
             (or match (empty? more))
             (cond-> {:event event :transcript (:file first-look) :bytes (:bytes first-look)
                      :found? (boolean match) :waited-ms (ms)}
-              (:kind match) (assoc :kind (:kind match)))
+              (:kind match) (assoc :kind (:kind match))
+              (= event "tool") (assoc :previous-found?
+                                      (when-not (str/blank? prev-id)
+                                        (boolean (:match (look (plan event (assoc in "tool_use_id" prev-id)) true))))))
             :else (recur more first-look)))))
     (catch Throwable e {:event event :error (str (ex-message e))})))
 
@@ -138,6 +146,13 @@
   (let [ev (try (json/parse-string (git "notes" "--ref=event" "show" c)) (catch Exception _ nil))]
     (str (subs c 0 10) " session " (or (get ev "session_id") "?") " " (git "log" "-1" "--format=%cI" c))))
 
+(defn- previous-row [ps]
+  (let [ps (filter #(contains? % :previous-found?) ps)
+        known (remove (comp nil? :previous-found?) ps)]
+    (when (seq known)
+      (format "  previous tool call in the transcript at the next hook: %d of %d"
+              (count (filter :previous-found? known)) (count known)))))
+
 (defn- row [kind ps]
   (let [ps (remove :error ps)
         once? #(< (:waited-ms % 0) (second looks))
@@ -150,6 +165,7 @@
 (defn report [ps]
   (doseq [[kind group] (sort-by key (group-by :event ps))]
     (println (row kind group))
+    (when-let [l (and (= kind "tool") (previous-row group))] (println l))
     (when-let [e (seq (filter :error group))] (println "   errors:" (count e) (pr-str (:error (first e))))))
   (let [never (filter #(false? (:found? %)) ps)]
     (when (seq never)
