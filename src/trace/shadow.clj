@@ -416,4 +416,5 @@
         (if-let [{:keys [head] r :root} (get-in @sh [:wts (norm root)])]
           (let [repo (get-in @sh [:roots r :repo])]
             (if-let [b (and head (blob-at sh repo head rel))] (String. ^bytes (blob-bytes sh repo b) "UTF-8") ""))
-          (disk/head-content real root rel))))))
+          (disk/head-content real root rel)))
+      (external-text [_ f] (disk/external-text real f)))))

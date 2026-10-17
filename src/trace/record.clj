@@ -42,6 +42,10 @@
   Every event's hook stdin is kept verbatim as a git note (refs/notes/event) on the commit
   it made, so nothing of the payload is dropped. Beside it, refs/notes/probe says whether the
   session transcript already held the event when the hook fired (trace.probe; live only).
+  refs/notes/turn holds what the transcript adds to the event, the model's side (trace.turn: model,
+  usage, thinking, durations; the turn's usage at its end), also live from the tail of the
+  file; refs/notes/output the output file of a background task a prompt's notification names.
+  A tool output Claude Code persisted to a file is recorded in full.
 
   Nothing is ever checked out: commits are built with a private index and
   commit-tree and moved with update-ref, under one mkdir lock, so concurrent
@@ -60,6 +64,7 @@
             [trace.disk :as disk]
             [trace.git :as g]
             [trace.probe :as probe]
+            [trace.turn :as turn]
             [trace.store :as store]))
 
 (def delim "--- error ---")
@@ -71,6 +76,8 @@
 
 (def notes-ref "refs/notes/event")
 (def probe-ref "refs/notes/probe")
+(def turn-ref "refs/notes/turn")
+(def output-ref "refs/notes/output")
 
 ;; x is the context of one event: {:s store :d disk :raw payload as received :probed probe}
 
@@ -99,7 +106,11 @@
   [x sha]
   (when (:raw x)
     (store/note! (:s x) notes-ref sha (:raw x))
-    (when (:probed x) (store/note! (:s x) probe-ref sha (pr-str (:probed x))))))
+    (when (:probed x) (store/note! (:s x) probe-ref sha (pr-str (:probed x))))
+    (when-let [t (:turn x)]
+      (store/note! (:s x) turn-ref sha (pr-str (dissoc t :pending-id)))
+      (when-let [id (:pending-id t)] ; the tool_use was not in the transcript yet: looked for at the next hook
+        (store/kv! (:s x) :turn-pending (:tkey x) {:id id :commit sha})))))
 
 ;; --- sessions -----------------------------------------------------------------
 
@@ -196,6 +207,14 @@
              last))
       ""))
 
+(defn- full-output
+  "The output of a tool call: when Claude Code kept the whole of it in a file and the result is
+  a preview that names it, the file's content."
+  [x in text]
+  (let [p (or (get-in in ["tool_response" "persistedOutputPath"])
+              (second (re-find #"Full output saved to: (\S+\.txt)" text)))]
+    (or (some->> p (disk/external-text (:d x))) text)))
+
 (defn- close!
   "Reply to the open prompt of key (a session id, or an agent's key) and merge it into
   its project (--no-ff: the merge's tree is the prompt's). An agent's branch is not merged."
@@ -223,6 +242,8 @@
                      (str "session " session_id "\ncwd " cwd "\nroot " root))]
       (advance! x branch c)
       (note! x c)
+      (when-let [out (some->> (re-find #"<output-file>(.+?)</output-file>" (str prompt)) second str/trim (disk/external-text (:d x)))]
+        (store/note! (:s x) output-ref c out))
       (store/kv! (:s x) :last session_id {:project project :branch branch :nn nn :root root})
       (state! x session_id {:project project :branch branch :nn nn :root root :k 0 :subject subject
                             :merge (vec (keep #(take-pending! x %) (map second (re-seq #"<task-id>([A-Za-z0-9]+)</task-id>" (str prompt)))))}))))
@@ -237,6 +258,7 @@
             text (text-of (get in "tool_response"))
             text (if (= hook_event_name "PostToolUseFailure") (or (get in "error") text) text)
             bad? (failed? in text)
+            text (full-output x in text)
             file (the-file x root in)
             rel (some->> file (rel-of root))
             agent (when-let [a (get in "agent_type")] (str "\n\n" "agent " a))
@@ -290,6 +312,14 @@
         (state! x (agent-key agent_id) {:project project :branch ab :nn anid :root root :k 0 :subject subject
                                       :agent true :session session_id})))))
 
+(defn- agent-reply
+  "What an agent said last: the payload's message, else the last assistant text of its transcript."
+  [session-id agent-id message]
+  (or (when-not (str/blank? message) message)
+      (when-let [f (agents/find-file session-id agent-id ".jsonl")]
+        (turn/last-text (turn/read-entries (:lines (probe/tail-lines f (* 256 1024))))))
+      ""))
+
 (defn on-subagent-stop
   "Close the agent's branch. Its tip is merged where the parent reacts to the agent's
   notification: into the parent's prompt when one is open (the notification is delivered
@@ -297,7 +327,7 @@
   [x {:strs [session_id agent_id last_assistant_message]}]
   (when agent_id
     (let [b (:branch (state x (agent-key agent_id)))]
-      (close! x (agent-key agent_id) (or last_assistant_message "") true)
+      (close! x (agent-key agent_id) (agent-reply session_id agent_id last_assistant_message) true)
       (when-let [t (and b (tip x b))]
         (if-let [st (state x session_id)]
           (state! x session_id (update st :merge (fnil conj []) t))
@@ -324,6 +354,42 @@
       m)
     (probe/measure event input)))
 
+(defn- transcript-of [{:strs [transcript_path agent_id session_id]}]
+  (if agent_id (some-> (agents/find-file session_id agent_id ".jsonl") str) transcript_path))
+
+(defn- tail-index
+  "The index of the tail of a transcript (the last `window` bytes)."
+  [file window]
+  (turn/index (turn/read-entries (:lines (probe/tail-lines file window)))))
+
+(def ^:private windows [(* 256 1024) (* 8 1024 1024)])
+
+(defn- live-turn
+  "What the transcript adds to a live event (trace.turn), read from its tail; nil when it is not
+  there. A tool call whose tool_use is not there yet is {:pending-id id}, found at the next hook."
+  [event {:strs [tool_use_id prompt] :as input}]
+  (try
+    (let [file (transcript-of input)]
+      (when (and file (fs/exists? file))
+        (case event
+          "tool" (or (some #(turn/tool (tail-index file %) tool_use_id {:duration-ms (get input "duration_ms")}) windows)
+                     {:use-found? false :pending-id tool_use_id})
+          "prompt" (let [ix (tail-index file (first windows))]
+                     (some->> (turn/find-prompt ix prompt) (turn/prompt ix)))
+          "stop" (turn/stop (tail-index file (first windows)))
+          nil)))
+    (catch Throwable _ nil)))
+
+(defn- late-turn
+  "The turn data of the previous tool call of this key, when it was not in the transcript then."
+  [x key input]
+  (try
+    (when-let [{:keys [id commit]} (store/kv (:s x) :turn-pending key)]
+      (when-let [file (transcript-of input)]
+        (when-let [t (some #(turn/tool (tail-index file %) id {}) windows)]
+          {:commit commit :turn (assoc t :late? true)})))
+    (catch Throwable _ nil)))
+
 (defn- recorded?
   "Will this event make a commit? Read-only and cheap, so the probe (which may wait) is only paid for those."
   [x event {:strs [session_id agent_id cwd]}]
@@ -342,10 +408,17 @@
   [x event input & [raw]]
   (store/ensure! (:s x))
   (let [x (assoc x :raw (or raw (json/generate-string input)))
-        x (assoc x :probed (when (and (:probe? x) (recorded? x event input)) (probe-event x event input)))]
+        live? (and (:probe? x) (recorded? x event input))
+        x (assoc x :probed (when live? (probe-event x event input))
+                 :turn (if live? (live-turn event input) (:turn x))
+                 :tkey (if (get input "agent_id") (agent-key (get input "agent_id")) (get input "session_id")))
+        late (when (and live? (#{"tool" "stop"} event)) (late-turn x (:tkey x) input))]
     (store/locked
      (:s x)
-     #(case event
+     #(case (do (when late
+                  (store/note! (:s x) turn-ref (:commit late) (pr-str (:turn late)))
+                  (store/kv! (:s x) :turn-pending (:tkey x) nil))
+                event)
         "prompt" (on-prompt x input)
         "tool" (on-tool x input)
         "stop" (on-stop x input)

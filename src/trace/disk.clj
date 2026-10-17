@@ -8,7 +8,9 @@
   (resolve-file d tok dirs)    the canonical path of the existing regular file a token names
                                (absolute, or relative to the first of dirs that has it), or nil
   (file-bytes d f)             its bytes, or nil
-  (head-content d root rel)    rel as the checkout at root has it committed, \"\" when it is not"
+  (head-content d root rel)    rel as the checkout at root has it committed, \"\" when it is not
+  (external-text d f)          the text of a file Claude Code keeps outside the project (a persisted
+                               tool output, a background task's output), or nil when it is gone"
   (:require [babashka.fs :as fs]
             [babashka.process :as p]
             [clojure.string :as str]))
@@ -17,7 +19,8 @@
   (project-of [d cwd])
   (resolve-file [d tok dirs])
   (file-bytes [d f])
-  (head-content [d root rel]))
+  (head-content [d root rel])
+  (external-text [d f]))
 
 (defn project-name [s] (str/replace (str s) #"[^A-Za-z0-9._-]" "_"))
 
@@ -52,7 +55,8 @@
   (file-bytes [_ f] (when (fs/regular-file? f) (fs/read-all-bytes f)))
   (head-content [_ root rel]
     (let [r (shell-git root "show" (str "HEAD:" rel))]
-      (if (zero? (:exit r)) (:out r) ""))))
+      (if (zero? (:exit r)) (:out r) "")))
+  (external-text [_ f] (when (and f (fs/regular-file? f)) (slurp (str f)))))
 
 (defn live
   "The real disk; repo is the trace repo, whose own directory is never traced."

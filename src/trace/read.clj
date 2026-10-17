@@ -126,6 +126,22 @@
                     (str s) paths))))
 
 (def ^:private cache (atom {}))
+(def ^:private turn-cache (atom {}))
+
+(defn turn-notes
+  "{commit data} of the commits among shas that have a note in refs/notes/turn (what the
+  transcript added: trace.turn), read from the note list kept per tip of the notes ref."
+  [shas]
+  (let [tip (str/trim (:out (g/git* {} "rev-parse" "-q" "--verify" "refs/notes/turn")))]
+    (when-not (str/blank? tip)
+      (let [m (or (get @turn-cache [g/*repo* tip])
+                  (let [m (into {} (keep #(let [[blob c] (str/split % #" ")] (when c [c blob])))
+                                (str/split-lines (git "notes" "--ref=turn" "list")))]
+                    (reset! turn-cache {[g/*repo* tip] m})
+                    m))
+            want (keep (fn [c] (when-let [b (get m c)] [c b])) shas)
+            blobs (cat-batch (map second want))]
+        (into {} (keep (fn [[c b]] (when-let [t (get blobs b)] [c (try (edn/read-string t) (catch Exception _ nil))])) want))))))
 
 (defn prompt-data*
   [main nn tip]
@@ -145,6 +161,8 @@
                           (and t (str/starts-with? t "--- error ---")) (assoc :err true)
                           (and (:result s) (nil? t)) (assoc :result nil :same true))))
                     steps)
+        tn (turn-notes (map :sha steps))
+        steps (mapv #(cond-> % (get tn (:sha %)) (assoc :turn (get tn (:sha %)))) steps)
         prompt (first (filter #(= :prompt (:kind %)) steps))
         response (first (filter #(= :response (:kind %)) steps))
         work (vec (map-indexed #(assoc %2 :i (inc %1)) (remove #(#{:prompt :response :baseline} (:kind %)) steps)))]
@@ -152,6 +170,7 @@
      :session (get head "session") :cwd (get head "cwd") :root (get head "root")
      :prompt (some-> prompt :sha (str ":doto.md") texts)
      :reply (some-> response :sha (str ":doto.md") texts)
+     :turn (:turn prompt) :turn-end (:turn response)
      :t0 (:at prompt) :t1 (or (:at response) (:at (peek work)) (:at prompt))
      :fork (some-> prompt :sha (str "^"))
      :steps work}))
