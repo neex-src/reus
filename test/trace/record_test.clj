@@ -1,6 +1,7 @@
 (ns trace.record-test
   "trace.record against a throwaway trace repo and project under <reus>/.scratch."
   (:require [babashka.fs :as fs]
+            [cheshire.core]
             [babashka.process :as p]
             [clojure.string :as str]
             [clojure.test :refer [deftest is testing]]
@@ -186,3 +187,39 @@
           (is (str/includes? (git "log" "--format=%s" "proj/main" "--" "feature.txt") "00.1 Bash: ls")))
         (is (str/includes? (git "log" "--format=%s" "proj/main") "prompt 00: feature work")
             "the session branch is part of main's history now")))))
+
+(deftest prompts-keep-the-tree-and-agents-start-in-their-worktree
+  (let [proj (fresh!) wt (str (fs/path scratch "wt")) tr (str (fs/path scratch "t.jsonl"))
+        tree (fn [rev] (git "rev-parse" (str rev "^{tree}")))
+        no-trace (fn [rev] (str/join "\n" (remove #(str/includes? % ".claude-trace") (str/split-lines (git "ls-tree" "-r" rev)))))]
+    (spit tr (str (cheshire.core/generate-string
+                   {"type" "assistant" "message" {"id" "m1" "content" [{"type" "tool_use" "id" "toolu_agent" "name" "Agent"
+                                                                        "input" {"prompt" "read the file, tell me" "description" "d" "subagent_type" "Explore"}}]}})
+                  "\n"))
+    (binding [g/*repo* (str (fs/path scratch "traces6"))]
+      (ev "prompt" {"session_id" "s1" "cwd" proj "prompt" "go"})
+      (spit (str (fs/path wt "feature.txt")) "one\n")
+      (real wt "add" ".") (real wt "commit" "-q" "-m" "feat")
+      (ev "tool" {"session_id" "s1" "cwd" proj "tool_name" "Write" "tool_input" {"file_path" (str (fs/path wt "feature.txt"))}
+                  "tool_response" "ok"})
+      (let [tool-c (git "rev-parse" "proj/s/s1")
+            wt-head (real wt "rev-parse" "HEAD")]
+        (is (= wt-head (trailer tool-c "Real-Head")))
+        (is (str/includes? (no-trace tool-c) "feature.txt") "a call in the worktree has the worktree's tree")
+        (ev "stop" {"session_id" "s1" "cwd" proj "last_assistant_message" "ok"})
+        (testing "the response, from the main checkout's cwd, keeps the tree of the previous commit"
+          (is (= (no-trace tool-c) (no-trace "proj/s/s1")))
+          (is (= wt-head (trailer "proj/s/s1" "Real-Head")) "and that worktree's HEAD")
+          (is (str/includes? (git "show" "proj/s/s1:.claude-trace/reply.md") "ok")))
+        (ev "prompt" {"session_id" "s1" "cwd" proj "prompt" "again"})
+        (testing "so does the next prompt"
+          (is (= (no-trace tool-c) (no-trace "proj/s/s1")))
+          (is (= wt-head (trailer "proj/s/s1" "Real-Head")))
+          (is (str/includes? (git "show" "proj/s/s1:.claude-trace/prompt.md") "again")))
+        (testing "an agent started in the worktree: its brief is the parent's Agent call, its tree and Real-Head the worktree's"
+          (ev "subagent-start" {"session_id" "s1" "cwd" wt "agent_id" "ab12" "agent_type" "Explore" "transcript_path" tr})
+          (let [b "proj/a/s1-ab12"]
+            (is (= "read the file, tell me" (git "show" (str b ":.claude-trace/prompt.md"))))
+            (is (str/includes? (git "log" "-1" "--format=%s" b) "Explore: read the file"))
+            (is (= wt-head (trailer b "Real-Head")))
+            (is (str/includes? (no-trace b) "feature.txt"))))))))

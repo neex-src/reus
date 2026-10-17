@@ -26,6 +26,10 @@
                :requires ([trace.probe])
                :task (apply trace.probe/-main *command-line-args*)}
 
+  trace:e2e {:doc "A real claude session in a fresh repo, recorded into a fresh trace repo, then checked (costs tokens)"
+             :requires ([trace.e2e])
+             :task (apply trace.e2e/-main *command-line-args*)}
+
   trace:test {:doc "Test the trace recorder"
               :requires ([clojure.test :as t] [trace.record-test])
               :task (let [{:keys [fail error]} (t/run-tests 'trace.record-test)]

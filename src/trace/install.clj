@@ -12,7 +12,9 @@
 
 (defn- hook [cmd] [{"hooks" [{"type" "command" "command" cmd "timeout" 15}]}])
 
-(defn- entries [bb-edn]
+(defn hook-entries
+  "The hooks settings for the bb.edn that has trace.record."
+  [bb-edn]
   (let [cmd #(str "bb --config " bb-edn " -m trace.record " %)]
     {"UserPromptSubmit" (hook (cmd "prompt"))
      "PostToolUse" (hook (cmd "tool"))
@@ -33,7 +35,7 @@
   "Install the hook; bb-edn is the absolute path of the bb.edn that has trace.record."
   [bb-edn]
   (rec/ensure-repo!)
-  (rewrite! #(merge-with into % (entries bb-edn)))
+  (rewrite! #(merge-with into % (hook-entries bb-edn)))
   (println "trace on: every Claude session in a git repo (or ~/projects/<x>) records into" g/*repo*)
   (println "settings:" settings "(previous version in settings.json.bak)"))
 
