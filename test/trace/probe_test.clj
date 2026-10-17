@@ -71,27 +71,38 @@
           (is (true? (:found? (probe-of "proj-p00-aab12")))))))))
 
 (deftest not-found-waits
-  (let [proj (fresh!) tr (str (fs/path scratch "s3.jsonl"))]
+  (let [proj (fresh!) tr (str (fs/path scratch "s3.jsonl"))
+        tool #(ev "tool" {"session_id" "s3" "cwd" proj "tool_name" "Bash" "tool_use_id" % "transcript_path" tr
+                          "tool_input" {"command" "ls"} "tool_response" {"stdout" "x"}} "{}")]
     (spit tr (str (say "earlier") (result "toolu_other")))
     (binding [g/*repo* (str (fs/path scratch "traces3"))]
       (ev "prompt" {"session_id" "s3" "cwd" proj "prompt" "go" "transcript_path" tr} "{}")
-      (ev "tool" {"session_id" "s3" "cwd" proj "tool_name" "Bash" "tool_use_id" "toolu_missing" "transcript_path" tr
-                  "tool_input" {"command" "ls"} "tool_response" {"stdout" "x"}} "{}")
+      (tool "toolu_missing")
       (let [pr (probe-of "proj-p00")]
         (is (false? (:found? pr)))
-        (is (<= 500 (:waited-ms pr) 1500))
+        (is (< (:waited-ms pr) 100) "a tool event is looked at once, no waiting")
+        (is (nil? (:previous-found? pr)) "no previous tool call")
+        (is (contains? pr :previous-found?))
         (is (nil? (:error pr))))
-      (testing "an event that is still being written is found on a later look"
-        (let [f (future (Thread/sleep 150) (spit tr (result "toolu_late") :append true))]
-          (ev "tool" {"session_id" "s3" "cwd" proj "tool_name" "Bash" "tool_use_id" "toolu_late" "transcript_path" tr
-                      "tool_input" {"command" "ls"} "tool_response" {"stdout" "x"}} "{}")
+      (testing "the previous tool call is looked for at the next one"
+        (tool "toolu_next")
+        (is (false? (:previous-found? (probe-of "proj-p00"))) "toolu_missing is still not in the transcript")
+        (spit tr (result "toolu_next") :append true)
+        (tool "toolu_third")
+        (is (true? (:previous-found? (probe-of "proj-p00")))))
+      (testing "a reply that is still being written is found on a later look"
+        (let [f (future (Thread/sleep 150) (spit tr (say "bye") :append true))]
+          (ev "stop" {"session_id" "s3" "last_assistant_message" "bye" "transcript_path" tr} "{}")
           @f
           (let [pr (probe-of "proj-p00")]
             (is (true? (:found? pr)))
             (is (<= 100 (:waited-ms pr) 600)))))
       (testing "a transcript that is not there is a miss, not a failure"
+        (ev "prompt" {"session_id" "s3" "cwd" proj "prompt" "again" "transcript_path" (str (fs/path scratch "none.jsonl"))} "{}")
         (ev "stop" {"session_id" "s3" "last_assistant_message" "bye" "transcript_path" (str (fs/path scratch "none.jsonl"))} "{}")
-        (is (false? (:found? (probe-of "proj-p00"))))))))
+        (let [pr (probe-of "proj-p01")]
+          (is (false? (:found? pr)))
+          (is (nil? (:error pr))))))))
 
 (deftest tail-only
   (let [tr (str (fs/path (fresh!) "big.jsonl"))]
