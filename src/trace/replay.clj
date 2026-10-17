@@ -10,17 +10,21 @@
   replaces it; the shadows are <repo>-wt.
 
   From a transcript:
-    prompt          a typed prompt; a slash command as `/name args`; a
-                    <task-notification> that opens a turn (queue `remove`, or a user
-                    entry), once per task id. Compaction summaries and meta messages are not.
+    prompt          what the live hook was seen to get: a typed prompt (also one typed
+                    into a running turn, a queue `remove`), a slash command as `/name args`,
+                    an agent's <agent-message> hand-back, a <task-notification> unless it
+                    only says the report came as such a message. Not: compaction
+                    summaries, interrupt markers, other meta messages.
     tool            a tool_use with its tool_result, at the result's time; tool_response is
                     the entry's toolUseResult; is_error -> PostToolUseFailure with `error`
-    stop            at the turn's stop-hook summary (else its last assistant entry), with
-                    the turn's last text; SessionEnd at the end of the file
+    stop            at the turn's stop-hook summary (transcripts without them: at an
+                    end_turn message), with the turn's last text; a prompt that comes
+                    while a turn runs does not end it; SessionEnd at the end of the file
     subagent-*      an agent file's first / last entry; its calls carry agent_id/agent_type
   Each payload has `replay` {file line}, kept in its note.
 
-  Before record sees a tool event, the shadow gets what the transcript proves: an
+  Before record sees a tool event, the shadow is moved to the call's start and gets what
+  the transcript proves, then to the call's end (a commit the call made): an
   Edit/MultiEdit/Write's resulting file (from originalFile and the input), a Bash call's
   bashEditDiff hunks, a full Read's content. Worktrees are the ones a transcript adds
   (`git worktree add`) plus the repo's current ones."
