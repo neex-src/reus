@@ -38,14 +38,14 @@
       (let [in {"session_id" "s1" "cwd" proj "tool_name" "Bash" "tool_use_id" "toolu_1" "transcript_path" tr
                 "tool_input" {"command" "ls"} "tool_response" {"stdout" "x"}}]
         (ev "tool" in (json/generate-string in))
-        (let [pr (probe-of "proj-p00")]
+        (let [pr (probe-of "proj/s/s1")]
           (is (= {:event "tool" :transcript tr :found? true} (select-keys pr [:event :transcript :found?])))
           (is (= (fs/size tr) (:bytes pr)))
           (is (< (:waited-ms pr) 100))
-          (is (= (json/generate-string in) (git "notes" "--ref=event" "show" (git "rev-parse" "proj-p00")))
+          (is (= (json/generate-string in) (git "notes" "--ref=event" "show" (git "rev-parse" "proj/s/s1")))
               "the event note stays the raw stdin"))
         (testing "the prompt was found, and as what"
-          (is (= {:found? true :kind "user"} (select-keys (edn/read-string (git "notes" "--ref=probe" "show" (git "rev-parse" "proj-p00~1")))
+          (is (= {:found? true :kind "user"} (select-keys (edn/read-string (git "notes" "--ref=probe" "show" (git "rev-parse" "proj/s/s1~1")))
                                                             [:found? :kind]))))))))
 
 (deftest found-for-an-agent
@@ -60,15 +60,15 @@
         (binding [g/*repo* (str (fs/path scratch "traces2"))]
           (ev "prompt" {"session_id" "s1" "cwd" proj "prompt" "go" "transcript_path" parent} "{}")
           (ev "subagent-start" {"session_id" "s1" "cwd" proj "agent_id" "ab12" "agent_type" "x" "transcript_path" parent} "{}")
-          (is (true? (:found? (probe-of "proj-p00-aab12"))) "the agent's file exists")
+          (is (true? (:found? (probe-of "proj/a/s1-ab12"))) "the agent's file exists")
           (ev "tool" {"session_id" "s1" "cwd" proj "agent_id" "ab12" "tool_use_id" "toolu_a" "transcript_path" parent
                       "tool_name" "Bash" "tool_input" {"command" "ls"} "tool_response" {"stdout" "x"}} "{}")
-          (let [pr (probe-of "proj-p00-aab12")]
+          (let [pr (probe-of "proj/a/s1-ab12")]
             (is (true? (:found? pr)) "found in the agent's transcript, not the (empty) parent's")
             (is (= (str af) (:transcript pr))))
           (spit (str af) (say "agent done") :append true)
           (ev "subagent-stop" {"session_id" "s1" "agent_id" "ab12" "last_assistant_message" "agent done"} "{}")
-          (is (true? (:found? (probe-of "proj-p00-aab12")))))))))
+          (is (true? (:found? (probe-of "proj/a/s1-ab12")))))))))
 
 (deftest not-found-waits
   (let [proj (fresh!) tr (str (fs/path scratch "s3.jsonl"))
@@ -78,7 +78,7 @@
     (binding [g/*repo* (str (fs/path scratch "traces3"))]
       (ev "prompt" {"session_id" "s3" "cwd" proj "prompt" "go" "transcript_path" tr} "{}")
       (tool "toolu_missing")
-      (let [pr (probe-of "proj-p00")]
+      (let [pr (probe-of "proj/s/s3")]
         (is (false? (:found? pr)))
         (is (< (:waited-ms pr) 100) "a tool event is looked at once, no waiting")
         (is (nil? (:previous-found? pr)) "no previous tool call")
@@ -86,21 +86,21 @@
         (is (nil? (:error pr))))
       (testing "the previous tool call is looked for at the next one"
         (tool "toolu_next")
-        (is (false? (:previous-found? (probe-of "proj-p00"))) "toolu_missing is still not in the transcript")
+        (is (false? (:previous-found? (probe-of "proj/s/s3"))) "toolu_missing is still not in the transcript")
         (spit tr (result "toolu_next") :append true)
         (tool "toolu_third")
-        (is (true? (:previous-found? (probe-of "proj-p00")))))
+        (is (true? (:previous-found? (probe-of "proj/s/s3")))))
       (testing "a reply that is still being written is found on a later look"
         (let [f (future (Thread/sleep 150) (spit tr (say "bye") :append true))]
           (ev "stop" {"session_id" "s3" "last_assistant_message" "bye" "transcript_path" tr} "{}")
           @f
-          (let [pr (probe-of "proj-p00")]
+          (let [pr (probe-of "proj/s/s3")]
             (is (true? (:found? pr)))
             (is (<= 100 (:waited-ms pr) 600)))))
       (testing "a transcript that is not there is a miss, not a failure"
         (ev "prompt" {"session_id" "s3" "cwd" proj "prompt" "again" "transcript_path" (str (fs/path scratch "none.jsonl"))} "{}")
         (ev "stop" {"session_id" "s3" "last_assistant_message" "bye" "transcript_path" (str (fs/path scratch "none.jsonl"))} "{}")
-        (let [pr (probe-of "proj-p01")]
+        (let [pr (probe-of "proj/s/s3")]
           (is (false? (:found? pr)))
           (is (nil? (:error pr))))))))
 

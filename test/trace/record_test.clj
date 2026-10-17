@@ -11,23 +11,33 @@
 (def scratch (str (fs/path (fs/parent (System/getProperty "babashka.config")) ".scratch" "trace-test")))
 
 (defn- sh [dir & args] (apply p/shell {:dir (str dir) :out :string :err :string} args))
+(defn- real [proj & args] (str/trim (:out (apply sh proj "git" "-c" "user.name=t" "-c" "user.email=t@t" args))))
 
-(defn- fresh! []
+(defn- fresh!
+  "A project with one commit, and a worktree of it on branch side next to it."
+  []
   (fs/delete-tree scratch)
   (let [proj (fs/path scratch "proj")]
     (fs/create-dirs proj)
     (sh proj "git" "init" "-q" "-b" "main")
     (spit (str (fs/path proj "a.clj")) "(ns a)\n\n(defn f [] 1)\n")
+    (spit (str (fs/path proj ".gitignore")) "ignored/\n")
     (sh proj "git" "add" ".")
-    (sh proj "git" "-c" "user.name=t" "-c" "user.email=t@t" "commit" "-q" "-m" "init")
-    (sh proj "git" "worktree" "add" "-q" "wt" "-b" "side")
+    (real proj "commit" "-q" "-m" "init")
+    (real proj "worktree" "add" "-q" "../wt" "-b" "side")
     (str proj)))
 
 (defn- ev [event m] (rec/handle! event m))
+(defn- tree-files [rev] (set (str/split-lines (git "ls-tree" "-r" "--name-only" rev))))
+(defn- trailer [rev k] (second (re-find (re-pattern (str "(?m)^" k ": (.+)$")) (git "log" "-1" "--format=%B" rev))))
 
 (deftest one-session
-  (let [proj (fresh!) a (str (fs/path proj "a.clj"))]
+  (let [proj (fresh!) a (str (fs/path proj "a.clj")) wt (str (fs/path scratch "wt"))
+        head (real proj "rev-parse" "HEAD")]
     (binding [g/*repo* (str (fs/path scratch "traces"))]
+      (fs/create-dirs (fs/path proj "ignored"))
+      (spit (str (fs/path proj "ignored" "x")) "not in the trace")
+      (spit (str (fs/path proj "new.txt")) "untracked, not ignored")
       (ev "prompt" {"session_id" "s1" "cwd" proj "prompt" "change f"})
       (ev "tool" {"session_id" "s1" "cwd" proj "tool_name" "Read" "tool_input" {"file_path" a}
                   "tool_response" {"file" {"content" "(ns a) ..."}}})
@@ -39,32 +49,53 @@
                   "tool_response" {"stdout" "a.clj\nwt"}})
       (ev "tool" {"session_id" "s1" "cwd" proj "hook_event_name" "PostToolUseFailure" "tool_name" "Bash"
                   "tool_input" {"command" "false"} "error" "Exit code 1"})
-      (testing "a second session in a worktree of the same project gets the next prompt"
-        (ev "prompt" {"session_id" "s2" "cwd" (str (fs/path proj "wt")) "prompt" "other"})
-        (ev "tool" {"session_id" "s2" "cwd" (str (fs/path proj "wt")) "tool_name" "Bash"
+      (testing "a second session in a worktree of the same project has a branch of its own"
+        (ev "prompt" {"session_id" "s2" "cwd" wt "prompt" "other"})
+        (ev "tool" {"session_id" "s2" "cwd" wt "tool_name" "Bash"
                     "tool_input" {"command" "pwd"} "tool_response" {"stdout" "x"}})
         (ev "stop" {"session_id" "s2" "last_assistant_message" "done 2"}))
       (ev "stop" {"session_id" "s1" "last_assistant_message" "f is 2 now"})
 
       (let [tips (r/tips)
-            d (r/prompt-data tips "proj" "00")
-            [rd ed run bad] (:steps d)]
+            d (r/prompt-data tips "proj" "s1@00")
+            [rd ed run bad] (:steps d)
+            b "proj/s/s1"]
         (is (= ["proj"] (r/mains tips)))
-        (is (= ["00" "01"] (r/prompt-nos tips "proj")))
+        (is (= ["s1@00" "s2@00"] (r/prompt-nos tips "proj")))
         (is (= "change f" (:prompt d)))
         (is (= "f is 2 now" (:reply d)))
-        (is (= [:read :edit :run :run] (map :kind (:steps d))) "the baseline is not a step")
-        (testing "a read's sha is the file as it was, stored in the trace repo"
+        (is (= [:read :edit :run :run] (map :kind (:steps d))))
+        (testing "a read is an empty diff of a whole tree, and its blob is the file as it was"
+          (is (empty? (:files rd)))
           (is (= "(ns a)\n\n(defn f [] 1)\n" (:out (g/git* {} "cat-file" "-p" (:blob rd)))))
           (is (= "a.clj" (:read-file rd))))
         (testing "an edit's diff is just the edit"
-          (is (= [["files/a.clj" 1 1]] (map (juxt :path :add :del) (:files ed)))))
-        (is (not (:err run)))
-        (is (:err bad) "a failure is marked")
-        (testing "both prompts are merged into the project, nothing left open"
-          (is (= 2 (count (str/split-lines (git "rev-list" "--merges" "proj")))))
-          (is (empty? (r/live-branches)))
-          (is (= (str (fs/path proj "wt")) (:cwd (r/prompt-data tips "proj" "01")))))))))
+          (is (= [["a.clj" 1 1]] (map (juxt :path :add :del) (:files ed)))))
+        (testing "the tree is the worktree: tracked and untracked files, not the ignored ones, and .claude-trace"
+          (let [fs* (tree-files (:sha ed))]
+            (is (every? fs* ["a.clj" ".gitignore" "new.txt" ".claude-trace/prompt.md"]))
+            (is (not-any? #(str/starts-with? % "ignored/") fs*))
+            (is (not (fs* ".claude-trace/reply.md")) "the reply is written at the end")))
+        (testing "the reply, after the last call"
+          (is (= "f is 2 now" (git "show" (str b ":.claude-trace/reply.md")))))
+        (testing "trailers and notes"
+          (is (= "Edit" (trailer (:sha ed) "Tool")))
+          (is (= "a.clj" (trailer (:sha ed) "File")))
+          (is (= head (trailer (:sha ed) "Real-Head")))
+          (is (:err bad) "a failure is marked")
+          (is (= "1" (trailer (:sha bad) "Exit")))
+          (is (= "a.clj\nwt" (git "cat-file" "-p" (:result run))))
+          (is (some? (git "notes" "--ref=event" "show" (:sha ed)))))
+        (testing "the worktree's session has the worktree's tree: its branch, not the main checkout's files"
+          (is (not ((tree-files "proj/s/s2") "new.txt")))
+          (is (= (real proj "rev-parse" "side") (trailer "proj/s/s2" "Real-Head"))))
+        (testing "trace main mirrors the real main: one commit, same tree, the real message"
+          (is (= (real proj "rev-parse" "HEAD^{tree}") (git "rev-parse" "proj/main^{tree}")))
+          (is (= head (trailer "proj/main" "Real-Commit")))
+          (is (str/starts-with? (git "log" "-1" "--format=%s" "proj/main") "init")))
+        (testing "both sessions start from trace main, and nothing is left open"
+          (is (= (git "rev-parse" "proj/main") (git "merge-base" "proj/main" b)))
+          (is (empty? (r/live-branches))))))))
 
 (deftest untraced
   (binding [g/*repo* (str (fs/path scratch "traces2"))]
@@ -91,41 +122,67 @@
                     "tool_name" "Bash" "tool_input" {"command" "echo agent-2"} "tool_response" {"stdout" "agent-2"}})
         (ev "subagent-stop" {"session_id" "s1" "agent_id" "ab12" "last_assistant_message" "agent done"}))
       (let [tips (r/tips)
-            parent (r/prompt-data tips "proj" "00")
-            agent (r/prompt-data tips "proj" "00-aab12")]
+            parent (r/prompt-data tips "proj" "s1@00")
+            agent (r/prompt-data tips "proj" "s1-ab12@00-aab12")]
         (testing "the parent's prompt has only the parent's calls"
           (is (= ["echo main-1" "echo main-2"] (map #(get-in % [:call :code]) (:steps parent)))))
         (testing "the agent's branch has the agent's calls and its reply"
           (is (= ["echo agent-1" "echo agent-2"] (map #(get-in % [:call :code]) (:steps agent))))
-          (is (= "agent done" (:reply agent))))
-        (testing "cut from the parent's tip at the start; nobody reacted yet, so it dangles"
-          (is (= 1 (count (str/split-lines (git "rev-list" "--merges" "proj")))))
-          (is (= 2 (count (str/split (git "log" "-1" "--format=%P" "proj") #" "))))
-          (is (not= (get tips "proj-p00") (get tips "proj-p00-aab12")))
-          (is (= ["00"] (r/prompt-nos tips "proj"))))
+          (is (= "agent done" (:reply agent)))
+          (is (= "general-purpose" (:agent (first (:steps agent))))))
+        (testing "cut from the parent's tip at the start; the parent has no link to it"
+          (is (= (git "rev-parse" "proj/s/s1~2") (git "merge-base" "proj/s/s1" "proj/a/s1-ab12")))
+          (is (= 1 (count (str/split (git "log" "-1" "--format=%P" "proj/s/s1") #" "))))
+          (is (= ["s1@00" "s1-ab12@00-aab12"] (r/prompt-nos tips "proj"))))
         (testing "every event keeps its raw payload as a note"
-          (let [c (get tips "proj-p00-aab12")]
-            (is (str/includes? (git "notes" "--ref=event" "show" c) "agent done"))))
+          (is (str/includes? (git "notes" "--ref=event" "show" "proj/a/s1-ab12") "agent done")))
         (is (empty? (r/live-branches)))))))
 
-(deftest agent-merged-where-the-parent-reacts
+(deftest agent-report-is-a-trailer
   (let [proj (fresh!)]
     (binding [g/*repo* (str (fs/path scratch "traces4"))]
       (ev "prompt" {"session_id" "s1" "cwd" proj "prompt" "go"})
       (ev "subagent-start" {"session_id" "s1" "cwd" proj "agent_id" "late" "agent_type" "x"})
       (ev "subagent-start" {"session_id" "s1" "cwd" proj "agent_id" "early" "agent_type" "x"})
       (ev "subagent-stop" {"session_id" "s1" "agent_id" "early" "last_assistant_message" "e"})
-      (testing "an agent that stops while the parent's prompt is open is merged with that prompt"
+      (testing "an agent that stops while the parent's prompt is open is reported in that prompt's response"
         (ev "stop" {"session_id" "s1" "last_assistant_message" "parent done"})
-        (let [tips (r/tips)]
-          (is (= [(get tips "proj-p00") (get tips "proj-p00-aearly")]
-                 (rest (str/split (git "log" "-1" "--format=%P" "proj") #" "))))))
-      (testing "an agent that stops while the parent is idle is merged by the prompt its notification opens"
+        (is (= (git "rev-parse" "proj/a/s1-early") (trailer "proj/s/s1" "Agent-Report"))))
+      (testing "an agent that stops while the parent is idle is reported by the prompt its notification opens"
         (ev "subagent-stop" {"session_id" "s1" "agent_id" "late" "last_assistant_message" "l"})
-        (is (= 3 (count (str/split (git "log" "-1" "--format=%P" "proj") #" "))) "not merged yet")
         (ev "prompt" {"session_id" "s1" "cwd" proj
                       "prompt" "<task-notification>\n<task-id>late</task-id>\n</task-notification>"})
-        (ev "stop" {"session_id" "s1" "last_assistant_message" "saw it"})
-        (let [tips (r/tips)]
-          (is (= [(get tips "proj-p01") (get tips "proj-p00-alate")]
-                 (rest (str/split (git "log" "-1" "--format=%P" "proj") #" ")))))))))
+        (is (= (git "rev-parse" "proj/a/s1-late") (trailer "proj/s/s1" "Agent-Report")))
+        (is (str/starts-with? (git "log" "-1" "--format=%s" "proj/s/s1") "prompt 01:")))
+      (testing "no parent links anywhere"
+        (is (= "" (str/join (filter #(> (count (str/split % #" ")) 1) (str/split-lines (git "log" "--format=%P" "proj/s/s1"))))))))))
+
+(deftest merge-gets-the-branches-that-worked-in-it
+  (let [proj (fresh!) wt (str (fs/path scratch "wt"))]
+    (binding [g/*repo* (str (fs/path scratch "traces5"))]
+      (ev "prompt" {"session_id" "s1" "cwd" proj "prompt" "main work"})
+      (ev "prompt" {"session_id" "s2" "cwd" wt "prompt" "feature work"})
+      (spit (str (fs/path wt "feature.txt")) "feature\n")
+      (real wt "add" ".")
+      (real wt "commit" "-q" "-m" "feature: a file")
+      (ev "tool" {"session_id" "s2" "cwd" wt "tool_name" "Bash" "tool_input" {"command" "ls"} "tool_response" {"stdout" "x"}})
+      (ev "stop" {"session_id" "s2" "last_assistant_message" "ok"})
+      (testing "a real commit on main is mirrored by the next hook, without extra parents"
+        (spit (str (fs/path proj "m.txt")) "m\n")
+        (real proj "add" ".")
+        (real proj "commit" "-q" "-m" "plain commit")
+        (ev "tool" {"session_id" "s1" "cwd" proj "tool_name" "Bash" "tool_input" {"command" "ls"} "tool_response" {"stdout" "x"}})
+        (is (= "plain commit" (git "log" "-1" "--format=%s" "proj/main")))
+        (is (= 1 (count (str/split (git "log" "-1" "--format=%P" "proj/main") #" ")))))
+      (testing "a real merge brings in the tip of the branch whose Real-Head is among the merged commits"
+        (real proj "merge" "-q" "--no-ff" "side" "-m" "Merge side")
+        (ev "tool" {"session_id" "s1" "cwd" proj "tool_name" "Bash" "tool_input" {"command" "ls"} "tool_response" {"stdout" "x"}})
+        (is (= "Merge side" (git "log" "-1" "--format=%s" "proj/main")))
+        (let [ps (str/split (git "log" "-1" "--format=%P" "proj/main") #" ")]
+          (is (= 2 (count ps)))
+          (is (= (git "rev-parse" "proj/s/s2") (second ps))))
+        (is (= (real proj "rev-parse" "HEAD^{tree}") (git "rev-parse" "proj/main^{tree}")))
+        (testing "git log -p of a file through main shows the tool calls that led to it"
+          (is (str/includes? (git "log" "--format=%s" "proj/main" "--" "feature.txt") "00.1 Bash: ls")))
+        (is (str/includes? (git "log" "--format=%s" "proj/main") "prompt 00: feature work")
+            "the session branch is part of main's history now")))))

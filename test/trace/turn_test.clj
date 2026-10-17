@@ -100,27 +100,27 @@
       (let [tool (fn [id m] (ev "tool" (merge {"session_id" "s1" "cwd" proj "tool_name" "Bash" "tool_use_id" id "transcript_path" tr
                                                "tool_input" {"command" "ls"} "tool_response" {"stdout" "x"}} m)))]
         (tool "u1" {"duration_ms" 1234})
-        (let [n (edn/read-string (note "turn" (git "rev-parse" "proj-p00")))]
+        (let [n (edn/read-string (note "turn" (git "rev-parse" "proj/s/s1")))]
           (is (= "m-1" (:model n)))
           (is (= 1234 (:duration-ms n)) "live, the payload's duration")
           (is (= 5 (get-in n [:usage :output_tokens]))))
         (testing "the assistant line is not written yet: found at the next hook"
           (tool "u9" {})
-          (is (= {:use-found? false} (edn/read-string (note "turn" (git "rev-parse" "proj-p00")))))
+          (is (= {:use-found? false} (edn/read-string (note "turn" (git "rev-parse" "proj/s/s1")))))
           (spit tr (str (json/generate-string (a "09.000" "m9" (use* "u9"))) "\n") :append true)
           (tool "u1" {})
-          (is (= "m9" (:message-id (edn/read-string (note "turn" (git "rev-parse" "proj-p00~1")))))))
+          (is (= "m9" (:message-id (edn/read-string (note "turn" (git "rev-parse" "proj/s/s1~1")))))))
         (testing "a persisted output is recorded in full"
           (tool "u1" {"tool_response" {"stdout" (str "<persisted-output>\nOutput too large. Full output saved to: " big "\n\nPreview:\nTHE WH")}})
-          (is (= "THE WHOLE OUTPUT\nline 2" (str/trim (git "show" (str (git "rev-parse" "proj-p00") ":reads/_cmd/00.4")))))))
+          (is (= "THE WHOLE OUTPUT\nline 2" (str/trim (note "output" (git "rev-parse" "proj/s/s1")))))))
       (testing "a prompt that is a task notification keeps the task's output"
         (spit tr (str (json/generate-string (prompt* "10.000" (str "<task-notification><output-file>" out-file "</output-file></task-notification>"))) "\n") :append true)
         (ev "stop" {"session_id" "s1" "last_assistant_message" "bye" "transcript_path" tr})
         (ev "prompt" {"session_id" "s1" "cwd" proj "transcript_path" tr
                       "prompt" (str "<task-notification><output-file>" out-file "</output-file></task-notification>")})
-        (is (= "background output" (note "output" (git "rev-parse" "proj-p01~0")))))
+        (is (= "background output" (note "output" (git "rev-parse" "proj/s/s1")))))
       (testing "the stop of a turn"
-        (is (some? (edn/read-string (note "turn" (git "rev-parse" "proj-p00")))))))))
+        (is (some? (edn/read-string (note "turn" (git "rev-parse" "proj/s/s1")))))))))
 
 (deftest subagent-without-a-message
   (let [proj (git-init (fs/path scratch "proj2")) pdir (str (fs/path scratch "projects"))
@@ -134,7 +134,7 @@
           (rec/handle! "subagent-start" {"session_id" "s1" "cwd" proj "agent_id" "ab12" "agent_type" "x"})
           (rec/handle! "subagent-stop" {"session_id" "s1" "agent_id" "ab12"})
           (let [tips (r/tips)]
-            (is (= "agent says" (:reply (r/prompt-data tips "proj2" "00-aab12"))))))))))
+            (is (= "agent says" (:reply (r/prompt-data tips "proj2" "s1-ab12@00-aab12"))))))))))
 
 ;; --- replay ---------------------------------------------------------------------------
 
@@ -153,7 +153,7 @@
     (let [stats (binding [rp/*history-dir* hist] (rp/replay! [f] repo {rt/orig proj}))]
       (is (= 1 (:backup-applied stats)))
       (binding [g/*repo* repo]
-        (let [tips (r/tips) d (r/prompt-data tips "proj" "00")
+        (let [tips (r/tips) d (r/prompt-data tips "proj" "s1@00")
               [rd ed] (:steps d)]
           (testing "the notes are read back: a step's, the prompt's and the stop's"
             (is (= 1000 (:duration-ms (:turn rd))))
