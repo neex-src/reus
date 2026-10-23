@@ -234,3 +234,19 @@
             (is (str/includes? (git "log" "-1" "--format=%s" b) "Explore: read the file"))
             (is (= wt-head (trailer b "Real-Head")))
             (is (str/includes? (no-trace b) "feature.txt"))))))))
+
+(deftest model-and-usage-from-the-payload
+  (let [proj (fresh!)]
+    (binding [g/*repo* (str (fs/path scratch "traces7"))]
+      (testing "without a transcript, the payload's model and usage become the trailers (moot's deepseek)"
+        (ev "prompt" {"hook_event_name" "UserPromptSubmit" "session_id" "d1" "cwd" proj "prompt" "moot x · round 1" "model" "deepseek-flash"})
+        (ev "stop" {"hook_event_name" "Stop" "session_id" "d1" "cwd" proj "last_assistant_message" "use f"
+                    "model" "deepseek-flash" "usage" {"input_tokens" 30 "output_tokens" 7 "cache_read_input_tokens" 3}})
+        (is (= "response 00" (git "log" "-1" "--format=%s" "proj/s/d1")))
+        (is (= "use f" (git "show" "proj/s/d1:.claude-trace/reply.md")))
+        (is (= ["deepseek-flash" "30" "7" "3"] (map #(trailer "proj/s/d1" %) ["Model" "Tokens-In" "Tokens-Out" "Cache-Read"]))))
+      (testing "a payload with a transcript is not read for them"
+        (ev "prompt" {"session_id" "s1" "cwd" proj "prompt" "p" "transcript_path" "/nonexistent.jsonl"})
+        (ev "stop" {"session_id" "s1" "cwd" proj "last_assistant_message" "r" "transcript_path" "/nonexistent.jsonl"
+                    "model" "m" "usage" {"input_tokens" 1}})
+        (is (nil? (trailer "proj/s/s1" "Model")))))))
