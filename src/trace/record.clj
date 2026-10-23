@@ -28,7 +28,9 @@
   Commit messages end in trailers: Tool, File, Exit, Error, Duration-Ms, Model, Tokens-In,
   Tokens-Out, Cache-Read, Cache-Write, Prompt-Id, Agent, Cwd, Real-Head (the worktree's HEAD
   at that moment), Agent-Report (the tip of an agent whose report this turn got, which is
-  no parent link). Notes: refs/notes/event is the hook stdin verbatim, probe says whether the
+  no parent link). Model and tokens come from the transcript; a payload without one may bring
+  them as `model` and `usage` (moot feeds a deepseek exchange as UserPromptSubmit / Stop with
+  last_assistant_message). Notes: refs/notes/event is the hook stdin verbatim, probe says whether the
   transcript already held the event (trace.probe), turn what the transcript adds (trace.turn),
   output the call's output text (a tool output Claude Code persisted to a file is recorded in
   full) or the output file of a background task a prompt's notification names.
@@ -534,6 +536,13 @@
      "subagent-stop" (and agent_id (:open? (state x (agent-key agent_id))))
      nil)))
 
+(defn- payload-turn
+  "Model and usage a payload brings itself when there is no transcript to read them from (moot
+  records a deepseek exchange that way); usage has the transcript's key names."
+  [{:strs [model usage transcript_path]}]
+  (when (and (nil? transcript_path) (or model usage))
+    {:model model :usage (update-keys (or usage {}) keyword)}))
+
 (defn handle-in!
   "Handle one hook event in context x ({:s store :d disk :probe? bool}); raw is its stdin as
   received (default: the parsed input re-encoded)."
@@ -542,7 +551,7 @@
   (let [x (assoc x :raw (or raw (json/generate-string input)))
         live? (and (:probe? x) (recorded? x event input))
         x (assoc x :probed (when live? (probe-event x event input))
-                 :turn (if live? (live-turn event input) (:turn x))
+                 :turn (or (if live? (live-turn event input) (:turn x)) (payload-turn input))
                  :tkey (if (get input "agent_id") (agent-key (get input "agent_id")) (get input "session_id")))
         late (when (and live? (#{"tool" "stop"} event)) (late-turn x (:tkey x) input))]
     (store/locked
