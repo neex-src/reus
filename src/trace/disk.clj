@@ -13,7 +13,8 @@
                              tool output, a background task's output), or nil when it is gone
   (snapshot d p)             the tree spec {:base sha} of the whole worktree of project p
                              ({:root :common :git-dir}) as it is now: tracked and untracked
-                             files that are not ignored, as `git add -A` takes them
+                             files that are not ignored, as `git add -A` takes them;
+                             nil when the worktree is gone
   (real-head d p)            the commit the worktree has checked out, or nil
   (main-tip d p)             the project's main (main, else master) tip, or nil
   (commit-info d p sha)      {:tree :parents :author :committer :message} of a real commit
@@ -56,8 +57,12 @@
     (when-let [[_ n] (re-find (re-pattern (str "^\\Q" projects "\\E/([^/]+)")) cwd)]
       {:project (project-name n) :root (str (fs/path projects n))})))
 
-(defn- shell-git [dir & args]
-  (apply p/shell {:out :string :err :string :continue true :dir (str dir)} "git" args))
+(defn- shell-git
+  "git in dir; a dir that is not there (a removed worktree) is a failed run, never an exception."
+  [dir & args]
+  (if (and dir (fs/directory? (str dir)))
+    (apply p/shell {:out :string :err :string :continue true :dir (str dir)} "git" args)
+    {:exit 128 :out "" :err (str "no such directory: " dir)}))
 
 (defn- out [r] (when (zero? (:exit r)) (str/trim (:out r))))
 
@@ -140,18 +145,19 @@
   (snapshot [_ {:keys [root common git-dir]}]
     ;; a private index per worktree, seeded from the worktree's own so the first look is cheap;
     ;; objects are written to the trace repo and read from the project's too
-    (let [idx (str (fs/path repo ".git" "trace-index" (project-name root)))
-          objects (str (fs/path repo ".git" "objects"))
-          env (if common
-                {"GIT_INDEX_FILE" idx "GIT_OBJECT_DIRECTORY" objects
-                 "GIT_ALTERNATE_OBJECT_DIRECTORIES" (str (fs/path common "objects"))}
-                {"GIT_INDEX_FILE" idx "GIT_DIR" (str (fs/path repo ".git")) "GIT_WORK_TREE" (str root)})
-          sh (fn [& args] (apply p/shell {:out :string :err :string :continue true :dir (str root) :extra-env env} "git" args))]
-      (when-not (fs/exists? idx)
-        (fs/create-dirs (fs/parent idx))
-        (when (and git-dir (fs/exists? (fs/path git-dir "index"))) (fs/copy (fs/path git-dir "index") idx)))
-      (sh "add" "-A" "--ignore-errors")
-      {:base (out (sh "write-tree"))}))
+    (when (fs/directory? (str root))
+      (let [idx (str (fs/path repo ".git" "trace-index" (project-name root)))
+            objects (str (fs/path repo ".git" "objects"))
+            env (if common
+                  {"GIT_INDEX_FILE" idx "GIT_OBJECT_DIRECTORY" objects
+                   "GIT_ALTERNATE_OBJECT_DIRECTORIES" (str (fs/path common "objects"))}
+                  {"GIT_INDEX_FILE" idx "GIT_DIR" (str (fs/path repo ".git")) "GIT_WORK_TREE" (str root)})
+            sh (fn [& args] (apply p/shell {:out :string :err :string :continue true :dir (str root) :extra-env env} "git" args))]
+        (when-not (fs/exists? idx)
+          (fs/create-dirs (fs/parent idx))
+          (when (and git-dir (fs/exists? (fs/path git-dir "index"))) (fs/copy (fs/path git-dir "index") idx)))
+        (sh "add" "-A" "--ignore-errors")
+        (when-let [t (out (sh "write-tree"))] {:base t}))))
   (real-head [_ {:keys [root]}] (git-in root "rev-parse" "HEAD"))
   (main-tip [_ {:keys [root common]}]
     (when common

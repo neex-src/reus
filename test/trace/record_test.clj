@@ -235,6 +235,39 @@
             (is (= wt-head (trailer b "Real-Head")))
             (is (str/includes? (no-trace b) "feature.txt"))))))))
 
+(deftest vanished-root-is-never-fatal
+  (let [proj (fresh!) wt (str (fs/path scratch "wt"))
+        no-trace (fn [rev] (str/join "\n" (remove #(str/includes? % ".claude-trace") (str/split-lines (git "ls-tree" "-r" rev)))))
+        bash (fn [cwd c] (ev "tool" {"session_id" "s1" "cwd" cwd "tool_name" "Bash" "tool_input" {"command" c} "tool_response" "ok"}))
+        subjects (fn [] (str/split-lines (git "log" "--format=%s" "proj/s/s1")))]
+    (binding [g/*repo* (str (fs/path scratch "traces7"))]
+      (spit (str (fs/path wt "wt-only.txt")) "one\n")
+      (ev "prompt" {"session_id" "s1" "cwd" wt "prompt" "work in the worktree"})
+      (bash wt "ls")
+      (let [before (no-trace "proj/s/s1")]
+        (is (str/includes? before "wt-only.txt"))
+        (real proj "worktree" "remove" "--force" wt)
+        (testing "no root can be found: the events still commit and keep the previous tree"
+          (bash wt "ls")
+          (ev "stop" {"session_id" "s1" "cwd" wt "last_assistant_message" "gone"})
+          (is (= before (no-trace "proj/s/s1")))
+          (is (= ["response 00" "00.2 Bash: ls" "00.1 Bash: ls"] (take 3 (subjects))))
+          (is (str/includes? (git "show" "proj/s/s1:.claude-trace/reply.md") "gone")))
+        (testing "the next prompt from the main checkout finds the project again"
+          (ev "prompt" {"session_id" "s1" "cwd" proj "prompt" "again"})
+          (bash proj "ls")
+          (is (= "01.1 Bash: ls" (first (subjects))))
+          (is (not (str/includes? (no-trace "proj/s/s1") "wt-only.txt")))
+          (is (= (real proj "rev-parse" "HEAD") (trailer "proj/s/s1" "Real-Head"))))
+        (testing "a root that goes away mid-prompt: the event's cwd gives the fresh one"
+          (real proj "worktree" "add" "-q" "../wt" "-b" "side2")
+          (ev "prompt" {"session_id" "s1" "cwd" wt "prompt" "back in a worktree"})
+          (spit (str (fs/path wt "second.txt")) "two\n")
+          (real proj "worktree" "remove" "--force" wt)
+          (bash proj "ls")
+          (is (= "02.1 Bash: ls" (first (subjects))))
+          (is (not (str/includes? (no-trace "proj/s/s1") "second.txt"))))))))
+
 (deftest model-and-usage-from-the-payload
   (let [proj (fresh!)]
     (binding [g/*repo* (str (fs/path scratch "traces7"))]
