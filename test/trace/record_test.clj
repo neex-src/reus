@@ -273,6 +273,19 @@
           (is (= "02.1 Bash: ls" (first (subjects))))
           (is (not (str/includes? (no-trace "proj/s/s1") "second.txt"))))))))
 
+(deftest health-state
+  (fresh!)
+  (binding [g/*repo* (str (fs/path scratch "traces"))]
+    (fs/create-dirs (fs/path g/*repo* ".git"))
+    (is (= "trace ok" (rec/health-line)))
+    (rec/health-fail! "tool" {"session_id" "s1"} (ex-info "boom" {}))
+    (let [since (second (re-find #"since (\S+):" (rec/health-line)))]
+      (is (str/ends-with? (rec/health-line) ": boom"))
+      (rec/health-fail! "stop" {"session_id" "s1"} (ex-info "bang" {}))
+      (is (= (str "trace failing since " since ": bang") (rec/health-line))))
+    (rec/health-ok!)
+    (is (= "trace ok" (rec/health-line)))))
+
 (deftest model-and-usage-from-the-payload
   (let [proj (fresh!)]
     (binding [g/*repo* (str (fs/path scratch "traces7"))]
