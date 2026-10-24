@@ -199,10 +199,6 @@
   "Open the root of the repo orig path p is in (so a replay knows its repos up front)."
   [sh p] (open-root! sh p))
 
-(defn objects-dirs
-  "The object directories of the repos opened so far."
-  [sh] (vec (distinct (map #(str (fs/path (:common %) "objects")) (vals (:roots @sh))))))
-
 (defn worktree!
   "Note that orig dir wt was a git worktree (a `git worktree add` in a transcript), on
   branch (nil when unknown or detached)."
@@ -468,6 +464,7 @@
     (let [repo (get-in @sh [:roots root :repo])]
       (when head
         {:base (commit-tree-of sh repo head)
+         :from (get-in @sh [:roots root :common])
          :changes (into {} (keep (fn [[p v]]
                                    (let [rel (rel-in wt p) tracked? (blob-at sh repo head rel)]
                                      (cond (= v :deleted) [rel nil]

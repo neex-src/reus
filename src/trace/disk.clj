@@ -142,20 +142,18 @@
     (let [r (shell-git root "show" (str "HEAD:" rel))]
       (if (zero? (:exit r)) (:out r) "")))
   (external-text [_ f] (when (and f (fs/regular-file? f)) (slurp (str f))))
-  (snapshot [_ {:keys [root common git-dir]}]
-    ;; a private index per worktree, seeded from the worktree's own so the first look is cheap;
-    ;; objects are written to the trace repo and read from the project's too
+  (snapshot [_ {:keys [root common]}]
+    ;; a private index per worktree, its objects written to the trace repo alone. Not seeded from the
+    ;; worktree's own index: that names blobs only the project repo has, so the first `add -A` hashes
+    ;; the whole tree once; later ones only what changed by stat.
     (when (fs/directory? (str root))
       (let [idx (str (fs/path repo ".git" "trace-index" (project-name root)))
             objects (str (fs/path repo ".git" "objects"))
             env (if common
-                  {"GIT_INDEX_FILE" idx "GIT_OBJECT_DIRECTORY" objects
-                   "GIT_ALTERNATE_OBJECT_DIRECTORIES" (str (fs/path common "objects"))}
+                  {"GIT_INDEX_FILE" idx "GIT_OBJECT_DIRECTORY" objects}
                   {"GIT_INDEX_FILE" idx "GIT_DIR" (str (fs/path repo ".git")) "GIT_WORK_TREE" (str root)})
             sh (fn [& args] (apply p/shell {:out :string :err :string :continue true :dir (str root) :extra-env env} "git" args))]
-        (when-not (fs/exists? idx)
-          (fs/create-dirs (fs/parent idx))
-          (when (and git-dir (fs/exists? (fs/path git-dir "index"))) (fs/copy (fs/path git-dir "index") idx)))
+        (fs/create-dirs (fs/parent idx))
         (sh "add" "-A" "--ignore-errors")
         (when-let [t (out (sh "write-tree"))] {:base t}))))
   (real-head [_ {:keys [root]}] (git-in root "rev-parse" "HEAD"))

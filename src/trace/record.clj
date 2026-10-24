@@ -22,8 +22,9 @@
   and untracked files that are not ignored, as `git add -A` has them: so a commit's diff is
   what that call changed, and a read is an empty diff), plus .claude-trace/ with prompt.md,
   reply.md, memory/ (the project's memory files) and claude-md/ (the CLAUDE.md chain in
-  effect), snapshotted at each prompt. The trace repo uses the project repos' objects
-  (objects/info/alternates), so trees refer to their blobs without copying them.
+  effect), snapshotted at each prompt. The trace repo holds every object it refers to (no
+  alternates): a snapshot writes the blobs it hashes, a mirror commit copies the real commit's
+  tree from the project repo, so the trace survives a project or worktree that moves or goes.
 
   Commit messages end in trailers: Tool, File, Exit, Error, Duration-Ms, Model, Tokens-In,
   Tokens-Out, Cache-Read, Cache-Write, Prompt-Id, Agent, Cwd, Real-Head (the worktree's HEAD
@@ -170,7 +171,7 @@
         msg (add-trailer message "Real-Commit" sha)
         [subject body] (let [i (str/index-of msg "\n")] (if i [(subs msg 0 i) (str/triml (subs msg i))] [msg ""]))]
     (store/advance! (:s x) ref
-                    (store/commit! (:s x) {:parents (vec (concat (when parent [parent]) extra)) :tree {:base tree}
+                    (store/commit! (:s x) {:parents (vec (concat (when parent [parent]) extra)) :tree {:base tree :from (:common p)}
                                            :subject subject :body body :author author :committer committer}))))
 
 (defn- mirror!
@@ -320,7 +321,6 @@
 (defn on-prompt [x {:strs [session_id prompt cwd transcript_path]}]
   (close! x session_id "")
   (when-let [{:keys [project root common] :as p} (disk/project-of (:d x) cwd)]
-    (when common (store/alternate! (:s x) (str common "/objects")))
     (mirror! x p)
     (ensure-main! x p)
     (let [branch (session-branch project session_id)

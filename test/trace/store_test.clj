@@ -22,19 +22,19 @@
 
 (defn- script
   "The same operations on a store, over a base tree that both repos can read; what it answers."
-  [s base]
+  [s base from]
   (store/ensure! s)
   (let [t1 (store/tree! s {"prompt.md" "do it" "memory/m.md" "x\n" "claude-md/c.md" (byte-array [0 1 2 255])})
         root (store/commit! s {:parents [] :tree {:base nil} :subject "trace of x" :body "root /x"})
         _ (store/advance! s "refs/heads/x/main" root)
-        p (store/commit! s {:parents [root] :tree {:base base :subtrees {".claude-trace" t1}}
+        p (store/commit! s {:parents [root] :tree {:base base :from from :subtrees {".claude-trace" t1}}
                             :subject "prompt 00: do it" :body "session s1\n\nCwd: /x"})
-        t (store/commit! s {:parents [p] :tree {:base base :subtrees {".claude-trace" t1}
+        t (store/commit! s {:parents [p] :tree {:base base :from from :subtrees {".claude-trace" t1}
                                                 :changes {"new.txt" "n\n" "a.clj" nil "d/deep.txt" "deep"}}
                             :subject "00.1 Bash: ls" :body "ls\n\nTool: Bash" :author author :committer committer})
-        r (store/commit! s {:parents [t] :tree {:base base :subtrees {".claude-trace" (store/tree! s {"prompt.md" "do it" "reply.md" "done"})}}
+        r (store/commit! s {:parents [t] :tree {:base base :from from :subtrees {".claude-trace" (store/tree! s {"prompt.md" "do it" "reply.md" "done"})}}
                             :subject "response 00" :body ""})
-        m (store/commit! s {:parents [root r] :tree {:base base} :subject "Merge side" :body "the real message\n\nReal-Commit: abc\n"
+        m (store/commit! s {:parents [root r] :tree {:base base :from from} :subject "Merge side" :body "the real message\n\nReal-Commit: abc\n"
                             :author author :committer committer})]
     (store/advance! s "refs/heads/x/main" m)
     (store/advance! s "refs/heads/x/s/s1" r)
@@ -59,15 +59,20 @@
     (sh proj {} "git" "add" ".")
     (sh proj {} "git" "-c" "user.name=t" "-c" "user.email=t@t" "commit" "-q" "-m" "init")
     (let [base (str/trim (:out (sh proj {} "git" "rev-parse" "HEAD^{tree}")))
-          objects (str (fs/path proj ".git" "objects"))
+          from (str (fs/path proj ".git"))
           l (binding [g/*env* env]
-              (let [s (store/live live-repo)] (store/ensure! s) (store/alternate! s objects) (script s base)))
-          b (let [s (store/batch batch-repo {:alternates [objects]})]
+              (let [s (store/live live-repo)] (store/ensure! s) (script s base from)))
+          b (let [s (store/batch batch-repo)]
               (store/at! s 1767265200000)
-              (let [r (script s base)] (store/close! s) r))]
+              (let [r (script s base from)] (store/close! s) r))]
       (testing "the store answers alike, a batch's commit ids resolve to the live shas"
         (is (= l b))
         (is (= 5 (count (distinct (:shas b))))))
+      (testing "each repo holds all its objects: no alternates, and still complete with the project gone"
+        (fs/delete-tree proj)
+        (doseq [repo [live-repo batch-repo]]
+          (is (not (fs/exists? (fs/path repo ".git" "objects" "info" "alternates"))))
+          (is (zero? (:exit (p/shell {:dir repo :out :string :err :string :continue true} "git" "fsck" "--no-dangling" "--connectivity-only"))))))
       (testing "the repos hold the same history: refs, commits (so trees, messages, idents) and notes"
         (let [out (fn [repo & args] (:out (apply sh repo {} "git" args)))
               heads #(out % "for-each-ref" "--format=%(refname) %(objectname)" "refs/heads")]

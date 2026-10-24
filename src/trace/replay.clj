@@ -25,8 +25,8 @@
   transcript adds to it (trace.turn), kept as the turn note, and file-history backups are
   evidence of a file's content when they were made.
 
-  The trace repo uses the object directories of the projects' repos found in the sessions'
-  cwds (alternates, set before fast-import starts); the CLAUDE.md files and memory files in
+  The trace repo holds its own objects: the trees a commit is based on are copied in from the
+  project repos found in the sessions' cwds before fast-import is told of them; the CLAUDE.md files and memory files in
   .claude-trace/ are what the transcripts proved (instructions, memory and file attachments,
   edits to those files).
 
@@ -364,7 +364,7 @@
         sh (shadow/create maps)
         _ (doseq [[wt branch] (distinct (worktree-adds evs))] (shadow/worktree! sh wt branch))
         _ (doseq [cwd (distinct (keep #(get-in % [:payload "cwd"]) evs))] (shadow/open! sh cwd))
-        store (store/batch repo {:alternates (shadow/objects-dirs sh)})
+        store (store/batch repo)
         x {:s store :d (shadow/disk sh repo)}
         st (atom {})]
     (try
