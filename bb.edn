@@ -22,6 +22,10 @@
                 :requires ([trace.replay])
                 :task (apply trace.replay/-main *command-line-args*)}
 
+  trace:health {:doc "Is the trace hook failing? bb trace:health  (reads .git/trace-health.edn of the trace repo only)"
+                :requires ([trace.record])
+                :task (println (trace.record/health-line))}
+
   trace:probe {:doc "Was the transcript written when the hook fired? bb trace:probe [repo]"
                :requires ([trace.probe])
                :task (apply trace.probe/-main *command-line-args*)}

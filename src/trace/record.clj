@@ -51,7 +51,9 @@
   Commits are built with commit-tree (the tree from a private index per worktree and
   `git add -A`) and moved with update-ref, under one mkdir lock, so concurrent sessions
   cannot disturb each other. Session state is in .git/trace-sessions/<session id>. Errors go
-  to .git/trace-errors.log; the hook always exits 0, so tracing never breaks a session.
+  to .git/trace-errors.log and the first failure's time with the latest reason to
+  .git/trace-health.edn (deleted by the next event that succeeds; bb trace:health reads it);
+  the hook always exits 0, so tracing never breaks a session.
 
   trace.replay feeds old transcripts through the same handlers, with a batch store and the
   disk as it was then (trace.shadow): every read or write of the trace repo goes through a
@@ -595,14 +597,41 @@
   [event input & [raw]]
   (handle-in! {:s (store/live g/*repo*) :d (disk/live g/*repo*) :probe? *probe?*} event input raw))
 
+(defn- health-file [] (gitdir "trace-health.edn"))
+
+(defn health-fail!
+  "Note that a hook failed: .git/trace-health.edn {:failing-since :reason :event :session}; the
+  first failing-since is kept while the failure goes on, reason/event/session are the latest."
+  [event input e]
+  (let [f (health-file)
+        since (or (try (:failing-since (read-string (slurp f))) (catch Throwable _ nil))
+                  (str (java.time.Instant/now)))]
+    (spit f (pr-str {:failing-since since :reason (or (ex-message e) (str e)) :event event
+                     :session (get input "session_id")}))))
+
+(defn health-ok!
+  "A hook succeeded: the trace is healthy again."
+  []
+  (fs/delete-if-exists (health-file)))
+
+(defn health-line
+  "What bb trace:health prints, from the health file alone (no git)."
+  []
+  (if-let [h (try (read-string (slurp (health-file)))
+                  (catch Throwable _ nil))]
+    (str "trace failing since " (:failing-since h) ": " (:reason h))
+    "trace ok"))
+
 (defn -main [& [event]]
   (let [raw (slurp *in*)
         input (try (json/parse-string raw) (catch Exception _ {}))]
     (try
       (binding [*probe?* true] (handle! event input raw))
+      (try (health-ok!) (catch Throwable _))
       (catch Throwable e
         (try (spit (gitdir "trace-errors.log")
                    (str (java.time.Instant/now) " " event " " (get input "session_id") " " (ex-message e) "\n")
                    :append true)
-             (catch Throwable _))))
+             (catch Throwable _))
+        (try (health-fail! event input e) (catch Throwable _))))
     (System/exit 0)))
