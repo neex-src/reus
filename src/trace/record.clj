@@ -196,6 +196,25 @@
 
 (defn- project-of-state [st] (select-keys st [:project :root :common :git-dir]))
 
+(defn- reroot
+  "st with a root that is still there. A session's :root/:troot are where it started and last worked;
+  when that worktree is removed under it, the project is found again from the event's cwd (same
+  project: its fresh root, :troot/:thead dropped); when it cannot be, st stays and the commit keeps
+  the previous tree (session-commit!). Never throws."
+  [x st cwd]
+  (try
+    (let [live? #(boolean (and % (disk/project-of (:d x) %)))]
+      (cond
+        (not (live? (:root st)))
+        (let [p (disk/project-of (:d x) cwd)]
+          (if (and p (= (:project p) (:project st)))
+            (-> st (merge (select-keys p [:root :common :git-dir])) (dissoc :troot :thead))
+            st))
+        (and (:troot st) (not= (:troot st) (:root st)) (not (live? (:troot st))))
+        (dissoc st :troot :thead)
+        :else st))
+    (catch Exception _ st)))
+
 (defn- turn-trailers
   "Model and token trailers from what the transcript adds (the usage is on the first call of a message)."
   [{:keys [model usage duration-ms]}]
@@ -209,9 +228,11 @@
   HEAD of that worktree is a trailer and is remembered as the branch's work on it. {:id :head}"
   [x st root subject body pairs ttree & [keep?]]
   (let [p (assoc (project-of-state st) :root root)
-        head (if keep? (or (:thead st) (disk/real-head (:d x) p)) (disk/real-head (:d x) p))
-        snap (if keep? {:keep true} (disk/snapshot (:d x) p))
         parent (tip x (:branch st))
+        snap0 (when-not keep? (disk/snapshot (:d x) p))
+        keep? (or keep? (nil? snap0))             ; a worktree that is gone keeps the previous tree
+        head (if keep? (or (:thead st) (disk/real-head (:d x) p)) (disk/real-head (:d x) p))
+        snap (cond snap0 snap0 parent {:keep true} :else {:base nil})
         c (store/commit! (:s x) {:parents (vec (remove nil? [parent]))
                                  :tree (assoc snap :subtrees {".claude-trace" ttree})
                                  :subject subject
@@ -285,8 +306,8 @@
 
 (defn- close!
   "Reply to the open prompt of key (a session id, or an agent's key)."
-  [x key reply & [note?]]
-  (when-let [{:keys [branch nn open? reports cwd] :as st} (state x key)]
+  [x key reply & [note? now-cwd]]
+  (when-let [{:keys [branch nn open? reports cwd] :as st} (some-> (state x key) (as-> s (reroot x s (or now-cwd (:cwd s)))))]
     (when (and open? (tip x branch))
       (mirror! x (project-of-state st))
       (let [files (assoc (or (store/kv (:s x) :tfiles key) {}) "reply.md" reply)
@@ -303,7 +324,9 @@
     (mirror! x p)
     (ensure-main! x p)
     (let [branch (session-branch project session_id)
-          prev (state x session_id)
+          raw (state x session_id)
+          prev (some-> raw (as-> s (reroot x s cwd)))
+          moved? (not= (select-keys raw [:root :troot]) (select-keys prev [:root :troot])) ; its worktree was gone
           n (inc (or (store/kv (:s x) :counters branch) -1))
           continuing? (and (pos? n) (= branch (:branch prev)) (tip x branch))
           troot (if continuing? (or (:troot prev) (:root prev)) root)
@@ -318,7 +341,7 @@
           _ (when-not (tip x branch) (advance! x branch (tip x (main-branch project))))
           {c :id head :head} (session-commit! x st troot subject (str "session " session_id "\ncwd " cwd "\nroot " root)
                                               (concat [["Cwd" cwd] ["Prompt-Id" (get-in x [:turn :prompt-id])]] (reports-of x reports))
-                                              ttree continuing?)]
+                                              ttree (and continuing? (not moved?)))]
       (note! x c)
       (when-let [out (some->> (re-find #"<output-file>(.+?)</output-file>" (str prompt)) second str/trim (disk/external-text (:d x)))]
         (store/note! (:s x) output-ref c out))
@@ -362,7 +385,7 @@
 
 (defn on-tool [x {:strs [session_id agent_id tool_name tool_input hook_event_name cwd] :as in}]
   (let [key (if agent_id (agent-key agent_id) session_id)]
-    (when-let [{:keys [branch nn open? k] :as st} (state x key)]
+    (when-let [{:keys [branch nn open? k] :as st} (some-> (state x key) (as-> s (reroot x s cwd)))]
       (when (and open? (tip x branch))
         (mirror! x (project-of-state st))
         (let [acted (call-root x st in)
@@ -423,7 +446,7 @@
       ""))
 
 (defn on-subagent-start [x {:strs [session_id agent_id agent_type cwd transcript_path]}]
-  (when-let [{:keys [project branch nn root common] :as st} (state x session_id)]
+  (when-let [{:keys [project branch nn root common] :as st} (some-> (state x session_id) (as-> s (reroot x s cwd)))]
     (when-let [t (and agent_id (tip x branch))]
       (let [anid (str nn "-a" agent_id)
             ab (agent-branch project session_id agent_id)
@@ -472,8 +495,8 @@
           (when (and (:agent st) (:open? st) (= session-id (:session st))) (str/replace k #"^agent-" "")))
         (store/kv-all (:s x) :sessions)))
 
-(defn on-stop [x {:strs [session_id hook_event_name] :as in}]
-  (close! x session_id (reply-of in) true)
+(defn on-stop [x {:strs [session_id hook_event_name cwd] :as in}]
+  (close! x session_id (reply-of in) true cwd)
   (when (= "SessionEnd" hook_event_name)
     (doseq [a (agent-states-of x session_id)] (close! x (agent-key a) "" false))))
 
