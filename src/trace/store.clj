@@ -7,8 +7,9 @@
   (sha-of s id) turns a commit id into its sha (a batch asks fast-import for it).
   A commit is {:parents [id...] :tree T :subject :body [:author :committer]} where the idents
   are \"Name <mail> epoch +zone\" (default: reus-trace, now / the batch's date) and
-  T = {:base tree-sha|nil :subtrees {dir tree-id} :changes {path content|nil}}: the tree
-  of base, with the trees (tree! s files) made put in at dirs, and files set or (nil) removed.
+  T = {:base tree-sha|nil :from git-dir :subtrees {dir tree-id} :changes {path content|nil}}: the
+  tree of base (when :from names the project repo it is a tree of, it is copied into the trace repo
+  with everything under it: the trace repo needs no other repo's objects), with the trees (tree! s files) made put in at dirs, and files set or (nil) removed.
   {:keep true} instead of :base: the tree of the first parent (only the subtrees change).
   Content is a string or bytes.
 
@@ -22,9 +23,7 @@
                 with commit-tree, refs by update-ref, one mkdir lock.
   (batch repo opts)  a replay's store: state in memory, objects streamed to one `git fast-import`,
                 blob shas computed in-process, commits addressed by marks; notes and refs are
-                written by (close! s). (at! s ms) sets the date of what follows. opts
-                {:alternates [objects-dir]} are the project repos whose objects the trees use
-                (set before fast-import starts, which cannot learn of them later)."
+                written by (close! s). (at! s ms) sets the date of what follows."
   (:require [babashka.fs :as fs]
             [babashka.process :as p]
             [clojure.edn :as edn]
@@ -45,7 +44,6 @@
   (tree! [s files] "Store {path content} as a tree; its id (for :subtrees).")
   (commit! [s c] "Make a commit (see ns); its id.")
   (sha-of [s id] "The sha of a commit id.")
-  (alternate! [s objects-dir] "Let the repo use the objects of another one.")
   (advance! [s ref id] "Point a full ref at id.")
   (note! [s ref id content] "Keep content as the note of commit id in notes ref.")
   (kv [s ns k] "The value of k in ns, or nil.")
@@ -105,10 +103,30 @@
                        [[(str "GIT_" who "_NAME") n] [(str "GIT_" who "_EMAIL") m] [(str "GIT_" who "_DATE") d]]))
                    [["AUTHOR" author] ["COMMITTER" committer]])))
 
+(defn- has-object? [repo sha]
+  (zero? (:exit (g/git* {:dir repo} "cat-file" "-e" sha))))
+
+(defn copy-tree!
+  "Make repo hold tree (and everything under it) from the git dir `from`, unless it does: a pack of
+  what `from` has beyond the tree `since` (when repo has that one), unpacked into repo. The trace
+  repo thus never depends on a project repo's objects."
+  [repo from tree & [since]]
+  (when (and from tree (not (has-object? repo tree)))
+    (let [since (when (and since (has-object? repo since)) since)
+          pack (p/process {:dir (str from) :in (str tree "\n" (when since (str "^" since "\n")))
+                           :err :string :extra-env g/*env*}
+                          "git" "pack-objects" "--revs" "--stdout" "-q")
+          un (p/process {:dir (str repo) :in (:out pack) :out :string :err :string :extra-env g/*env*}
+                        "git" "unpack-objects" "-q")
+          r @un]
+      (when-not (zero? (:exit r))
+        (throw (ex-info "could not copy a tree into the trace repo" {:tree tree :from from :err (:err r)}))))))
+
 (defn- live-tree
   "The sha of tree spec T (see ns)."
   [repo {:keys [base subtrees changes]}]
   (let [base (or base empty-tree)]
+    (when (= base empty-tree) (git "mktree" {:in ""})) ; git knows it without having it; fsck wants it
     (cond
       (and (empty? subtrees) (empty? changes)) base
 
@@ -170,6 +188,9 @@
   (tree! [_ files] (in repo (if (empty? files) empty-tree (live-tree! repo files))))
   (commit! [_ {:keys [parents tree subject body author committer]}]
     (in repo
+      (when (:from tree)
+        (copy-tree! repo (:from tree) (:base tree)
+                    (some-> (first parents) (as-> p (live-tip (str p "^{tree}"))))))
       (apply git "commit-tree" (live-tree repo (if (:keep tree)
                                                  (assoc tree :base (git "rev-parse" (str (first parents) "^{tree}")))
                                                  tree))
@@ -177,12 +198,6 @@
                      ["-m" subject] (when-not (str/blank? body) ["-m" body])
                      [{:extra-env (ident-env author committer)}]))))
   (sha-of [_ id] id)
-  (alternate! [_ dir]
-    (let [f (fs/path (gitdir repo "objects" "info") "alternates")
-          have (when (fs/exists? f) (str/split-lines (slurp (str f))))]
-      (when-not (some #{(str dir)} have)
-        (fs/create-dirs (fs/parent f))
-        (spit (str f) (str (str/join "\n" (concat have [(str dir)])) "\n")))))
   (advance! [_ ref id] (in repo (git "update-ref" ref id)))
   (note! [_ ref id content] (in repo (live-add-note repo ref id content)))
   (kv [_ ns k] (read-kv ns (kv-file repo ns k)))
@@ -271,6 +286,9 @@
   (blob! [this content] (emit-blob! this content) (blob-sha content))
   (tree! [_ files] {::tree files})
   (commit! [this {:keys [parents tree subject body author committer]}]
+    (when-let [from (:from tree)]
+      (copy-tree! repo from (:base tree) (get-in @st [:copied from]))
+      (swap! st assoc-in [:copied from] (:base tree)))
     (let [{:keys [base subtrees changes keep]} tree
           complete (fn [t] (if (str/ends-with? t "\n") t (str t "\n")))
           msg (str (complete (str subject)) (when-not (str/blank? body) (str "\n" (complete body))))
@@ -286,7 +304,6 @@
           (.flush ^OutputStream out)
           (or (.readLine ^BufferedReader rd) (throw (ex-info "git fast-import is gone" {:id id}))))
       id))
-  (alternate! [_ dir] (when-not (some #{(str dir)} (:alternates @st)) (throw (ex-info "a batch store needs its alternates up front" {:dir dir}))))
   (advance! [_ ref id] (swap! st assoc-in [:refs ref] id) nil)
   (note! [this ref id content]
     (emit-blob! this content)
@@ -300,13 +317,10 @@
 
 (defn batch
   "A replay's store for the (new) trace repo; a git fast-import is running until (close! s)."
-  [repo & [{:keys [alternates]}]]
+  [repo]
   (let [repo (str repo)]
     (fs/create-dirs repo)
     (g/git* {:dir repo} "init" "-q" "-b" "_")
-    (when (seq alternates)
-      (fs/create-dirs (fs/path repo ".git" "objects" "info"))
-      (spit (str (fs/path repo ".git" "objects" "info" "alternates")) (str (str/join "\n" alternates) "\n")))
     (let [pb (doto (ProcessBuilder. ["git" "-c" "user.name=reus-trace" "-c" "user.email=trace@reus.local"
                                      "fast-import" "--quiet" "--force" "--date-format=raw" "--done"])
                (.directory (fs/file repo))
@@ -314,7 +328,7 @@
           proc (.start pb)]
       (->Batch repo proc (BufferedOutputStream. (.getOutputStream proc) 65536)
                (BufferedReader. (InputStreamReader. (.getInputStream proc)))
-               (atom {:n 0 :refs {} :blobs {} :notes {} :kv {} :alternates (set (map str alternates))
+               (atom {:n 0 :refs {} :blobs {} :notes {} :kv {} :copied {}
                       :date (git-date (System/currentTimeMillis))})))))
 
 (defn at! "Date what the batch store writes next (epoch ms)." [s ms]

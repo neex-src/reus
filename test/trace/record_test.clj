@@ -96,7 +96,12 @@
           (is (str/starts-with? (git "log" "-1" "--format=%s" "proj/main") "init")))
         (testing "both sessions start from trace main, and nothing is left open"
           (is (= (git "rev-parse" "proj/main") (git "merge-base" "proj/main" b)))
-          (is (empty? (r/live-branches))))))))
+          (is (empty? (r/live-branches))))
+        (testing "the trace repo owns its objects: no alternates, complete once the project and its worktree are gone"
+          (is (not (fs/exists? (fs/path g/*repo* ".git" "objects" "info" "alternates"))))
+          (fs/delete-tree proj)
+          (fs/delete-tree wt)
+          (is (zero? (:exit (g/git* {} "fsck" "--no-dangling" "--connectivity-only")))))))))
 
 (deftest untraced
   (binding [g/*repo* (str (fs/path scratch "traces2"))]
