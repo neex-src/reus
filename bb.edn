@@ -26,6 +26,10 @@
                 :requires ([trace.record])
                 :task (println (trace.record/health-line))}
 
+  trace:status {:doc "trace:health for a status bar: prints nothing while the trace is ok (the sandbox tmux status-right runs it)"
+                :requires ([trace.record])
+                :task (print (trace.record/health-short))}
+
   trace:probe {:doc "Was the transcript written when the hook fired? bb trace:probe [repo]"
                :requires ([trace.probe])
                :task (apply trace.probe/-main *command-line-args*)}

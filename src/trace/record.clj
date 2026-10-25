@@ -622,6 +622,20 @@
     (str "trace failing since " (:failing-since h) ": " (:reason h))
     "trace ok"))
 
+(defn health-short
+  "health-line for a status bar: empty while the trace is ok, else since (local MM-dd HH:mm) and
+  the reason cut to 60 chars."
+  []
+  (if-let [h (try (read-string (slurp (health-file)))
+                  (catch Throwable _ nil))]
+    (let [since (try (.format (java.time.LocalDateTime/ofInstant (java.time.Instant/parse (:failing-since h))
+                                                                  (java.time.ZoneId/systemDefault))
+                              (java.time.format.DateTimeFormatter/ofPattern "MM-dd HH:mm"))
+                     (catch Throwable _ (:failing-since h)))
+          reason (str/replace (str (:reason h)) #"\s+" " ")]
+      (str "TRACE FAILING since " since ": " (cond-> reason (> (count reason) 60) (-> (subs 0 60) (str "…")))))
+    ""))
+
 (defn -main [& [event]]
   (let [raw (slurp *in*)
         input (try (json/parse-string raw) (catch Exception _ {}))]
