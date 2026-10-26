@@ -13,21 +13,24 @@
                              tool output, a background task's output), or nil when it is gone
   (snapshot d p)             the tree spec {:base sha} of the whole worktree of project p
                              ({:root :common :git-dir}) as it is now: tracked and untracked
-                             files that are not ignored, as `git add -A` takes them;
-                             nil when the worktree is gone
+                             files that are not ignored, as `git add -A` takes them; nil when the
+                             worktree is gone or is no git worktree (a dir outside git is never
+                             hashed: it can be anything, of any size). Throws when git fails.
   (real-head d p)            the commit the worktree has checked out, or nil
   (main-tip d p)             the project's main (main, else master) tip, or nil
   (commit-info d p sha)      {:tree :parents :author :committer :message} of a real commit
-                             (idents as \"Name <mail> epoch +zone\")
+                             (idents as \"Name <mail> epoch +zone\"), or nil
   (chain d p from to)        the first-parent commits after from up to to, oldest first (just to
-                             when from is nil)
+                             when from is nil or no longer there)
   (range-set d p excl incl)  the commits that are in incl and not in excl
   (trace-files d session cwd transcript)
                              {\"memory/<f>\" content \"claude-md/<f>\" content}: the project's
                              memory files and the CLAUDE.md chain in effect"
   (:require [babashka.fs :as fs]
             [babashka.process :as p]
-            [clojure.string :as str]))
+            [clojure.string :as str]
+            [trace.files :as files]
+            [trace.git :as g]))
 
 (defprotocol Disk
   (project-of [d cwd])
@@ -46,9 +49,10 @@
 (defn project-name [s] (str/replace (str s) #"[^A-Za-z0-9._-]" "_"))
 
 (defn projects-root
-  "Where the projects are, for a cwd outside git: $TRACE_PROJECTS, else ~/projects."
+  "Where the projects are, for a cwd outside git: $TRACE_PROJECTS, else the dir the reus checkout
+  sits in (~/projects on the host, ~/projects in the sandbox)."
   []
-  (or (System/getenv "TRACE_PROJECTS") (str (fs/path (fs/home) "projects"))))
+  (or (System/getenv "TRACE_PROJECTS") (str (fs/parent g/home))))
 
 (defn projects-project
   "The project of a cwd outside git: the <projects-root>/<name> it sits in."
@@ -61,7 +65,7 @@
   "git in dir; a dir that is not there (a removed worktree) is a failed run, never an exception."
   [dir & args]
   (if (and dir (fs/directory? (str dir)))
-    (apply p/shell {:out :string :err :string :continue true :dir (str dir)} "git" args)
+    (apply p/shell {:out :string :err :string :continue true :dir (str dir) :extra-env g/*env*} "git" args)
     {:exit 128 :out "" :err (str "no such directory: " dir)}))
 
 (defn- out [r] (when (zero? (:exit r)) (str/trim (:out r))))
@@ -85,12 +89,17 @@
 (def info-format "--format=%an%x01%ae%x01%ad%x01%cn%x01%ce%x01%cd%x01%P%x01%T%x01%B")
 
 (defn real-info [dir sha]
-  (some-> (git-in dir "log" "-1" "--date=raw" info-format sha) parse-info))
+  (when-not (str/blank? sha)
+    (some-> (git-in dir "log" "-1" "--date=raw" info-format sha) not-empty parse-info)))
 
-(defn real-chain [dir from to]
-  (if from
-    (vec (str/split-lines (or (git-in dir "rev-list" "--first-parent" "--reverse" (str from ".." to)) "")))
-    [to]))
+(defn real-chain
+  "First-parent commits after from up to to, oldest first. When from is nil, or gone from the repo
+  (main rewritten and pruned), just to: the mirror goes on from the new tip instead of failing forever."
+  [dir from to]
+  (let [listed (when from (git-in dir "rev-list" "--first-parent" "--reverse" (str from ".." to)))]
+    (cond (nil? from) [to]
+          (nil? listed) [to]
+          :else (vec (remove str/blank? (str/split-lines listed))))))
 
 (defn real-range [dir excl incl]
   (set (remove str/blank? (str/split-lines (or (git-in dir "rev-list" (str excl ".." incl)) "")))))
@@ -119,6 +128,43 @@
                     (for [f (fs/glob mem "**.md") :when (fs/regular-file? f) :let [c (read f)] :when c]
                       [(str "memory/" (str (fs/relativize mem f))) c]))))))
 
+(def snapshot-ms
+  "How long a snapshot may hash before it gives up (the hook has 15 s in all)."
+  10000)
+
+(defn- run-git
+  "git with env in dir, at most ms (nil: no limit): the result, {:timeout true} when cut off."
+  [dir env ms & args]
+  (let [pr (apply p/process {:dir (str dir) :extra-env env :out :string :err :string} "git" args)
+        r (if ms (deref pr ms ::timeout) @pr)]
+    (if (= r ::timeout)
+      (do (p/destroy-tree pr) {:exit -1 :timeout true :err (str "git " (first args) " took over " ms " ms")})
+      r)))
+
+(defn live-snapshot
+  "The tree of the worktree at root, hashed into the trace repo through a private index of its own.
+  Under an OS lock per index, so a stale git `.lock` beside it is a dead git's and is removed. A tree
+  that cannot be written (an index naming a blob the trace repo lacks) gets one fresh index, which
+  re-hashes everything; a second failure throws. Hashing longer than ms throws."
+  [repo {:keys [root common]} & [{:keys [ms] :or {ms snapshot-ms}}]]
+  (let [key (project-name root)
+        idx (str (fs/path repo ".git" "trace-index" key))
+        env {"GIT_INDEX_FILE" idx "GIT_OBJECT_DIRECTORY" (str (fs/path repo ".git" "objects"))
+             "GIT_OPTIONAL_LOCKS" "0"}
+        attempt (fn []
+                  (let [add (run-git root env ms "add" "-A" "--ignore-errors")]
+                    (when (:timeout add) (throw (ex-info (str "snapshot of " root ": " (:err add)) {:slow true :root root})))
+                    (run-git root env ms "write-tree")))]
+    (files/with-file-lock (str idx ".oslock") ms
+      (fn []
+        (fs/delete-if-exists (str idx ".lock"))
+        (let [r (attempt)
+              r (if (zero? (:exit r)) r (do (fs/delete-if-exists idx) (attempt)))]
+          (if (zero? (:exit r))
+            {:base (str/trim (:out r))}
+            (throw (ex-info (str "snapshot of " root " failed: " (str/trim (str (:err r)))) {:root root})))))
+      #(throw (ex-info (str "snapshot of " root ": its index stayed locked for " ms " ms") {:slow true :root root})))))
+
 (defrecord Live [repo]
   Disk
   (project-of [_ cwd]
@@ -142,21 +188,10 @@
     (let [r (shell-git root "show" (str "HEAD:" rel))]
       (if (zero? (:exit r)) (:out r) "")))
   (external-text [_ f] (when (and f (fs/regular-file? f)) (slurp (str f))))
-  (snapshot [_ {:keys [root common]}]
-    ;; a private index per worktree, its objects written to the trace repo alone. Not seeded from the
-    ;; worktree's own index: that names blobs only the project repo has, so the first `add -A` hashes
-    ;; the whole tree once; later ones only what changed by stat.
-    (when (fs/directory? (str root))
-      (let [idx (str (fs/path repo ".git" "trace-index" (project-name root)))
-            objects (str (fs/path repo ".git" "objects"))
-            env (if common
-                  {"GIT_INDEX_FILE" idx "GIT_OBJECT_DIRECTORY" objects}
-                  {"GIT_INDEX_FILE" idx "GIT_DIR" (str (fs/path repo ".git")) "GIT_WORK_TREE" (str root)})
-            sh (fn [& args] (apply p/shell {:out :string :err :string :continue true :dir (str root) :extra-env env} "git" args))]
-        (fs/create-dirs (fs/parent idx))
-        (sh "add" "-A" "--ignore-errors")
-        (when-let [t (out (sh "write-tree"))] {:base t}))))
-  (real-head [_ {:keys [root]}] (git-in root "rev-parse" "HEAD"))
+  (snapshot [_ {:keys [root common] :as p}]
+    (when (and common (fs/directory? (str root)))
+      (live-snapshot repo p)))
+  (real-head [_ {:keys [root]}] (git-in root "rev-parse" "-q" "--verify" "HEAD"))
   (main-tip [_ {:keys [root common]}]
     (when common
       (or (git-in root "rev-parse" "--verify" "-q" "refs/heads/main")

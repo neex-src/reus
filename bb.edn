@@ -10,7 +10,7 @@
              :requires ([trace.raw])
              :task (apply trace.raw/-main *command-line-args*)}
 
-  trace:on {:doc "Record every Claude session into var/traces (global hook)"
+  trace:on {:doc "Record every Claude session into var/traces (the global hook; again after an update: it rewrites the hook lines)"
             :requires ([trace.install])
             :task (trace.install/on (str (fs/canonicalize (System/getProperty "babashka.config"))))}
 
@@ -22,13 +22,21 @@
                 :requires ([trace.replay])
                 :task (apply trace.replay/-main *command-line-args*)}
 
-  trace:health {:doc "Is the trace hook failing? bb trace:health  (reads .git/trace-health.edn of the trace repo only)"
-                :requires ([trace.record])
-                :task (println (trace.record/health-line))}
+  trace:health {:doc "Is the trace working? bb trace:health  (failing hook or worker, events not recorded yet, failed ones)"
+                :requires ([trace.health])
+                :task (println (trace.health/line))}
 
-  trace:status {:doc "trace:health for a status bar: prints nothing while the trace is ok (the sandbox tmux status-right runs it)"
-                :requires ([trace.record])
-                :task (print (trace.record/health-short))}
+  trace:status {:doc "trace:health for a status bar: prints nothing while the trace is ok"
+                :requires ([trace.health])
+                :task (print (trace.health/short))}
+
+  trace:drain {:doc "Record what the hook spooled, now, in this process (the worker does it by itself)"
+               :requires ([trace.worker trace.git])
+               :task (println (trace.worker/drain! trace.git/*repo*) "events recorded")}
+
+  trace:retry {:doc "Spool the events the worker could not record again, and record them"
+               :requires ([trace.worker trace.git])
+               :task (let [r trace.git/*repo*] (println (trace.worker/retry! r) "spooled again;" (trace.worker/drain! r) "recorded"))}
 
   trace:probe {:doc "Was the transcript written when the hook fired? bb trace:probe [repo]"
                :requires ([trace.probe])
@@ -44,8 +52,8 @@
                       (System/exit (if (zero? (+ fail error)) 0 1)))}
 
   test {:doc "Every test of this repo (the shell.js one needs node)"
-        :requires ([clojure.test :as t] [trace.record-test] [trace.replay-test] [trace.probe-test] [trace.store-test] [trace.turn-test] [trace.ignore-test] [jsonl.read-test])
-        :task (let [{:keys [fail error]} (t/run-tests 'trace.record-test 'trace.replay-test 'trace.probe-test 'trace.store-test 'trace.turn-test 'trace.ignore-test 'jsonl.read-test)
+        :requires ([clojure.test :as t] [trace.record-test] [trace.hook-test] [trace.replay-test] [trace.probe-test] [trace.store-test] [trace.turn-test] [trace.ignore-test] [jsonl.read-test])
+        :task (let [{:keys [fail error]} (t/run-tests 'trace.record-test 'trace.hook-test 'trace.replay-test 'trace.probe-test 'trace.store-test 'trace.turn-test 'trace.ignore-test 'jsonl.read-test)
                     js (:exit (shell {:continue true} "node test/trace/shell_test.js"))]
                 (System/exit (if (and (zero? (+ fail error)) (zero? js)) 0 1)))}
 

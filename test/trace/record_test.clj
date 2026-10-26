@@ -6,6 +6,7 @@
             [clojure.string :as str]
             [clojure.test :refer [deftest is testing]]
             [trace.git :as g :refer [git]]
+            [trace.health :as health]
             [trace.read :as r]
             [trace.record :as rec]))
 
@@ -277,14 +278,14 @@
   (fresh!)
   (binding [g/*repo* (str (fs/path scratch "traces"))]
     (fs/create-dirs (fs/path g/*repo* ".git"))
-    (is (= "trace ok" (rec/health-line)))
-    (rec/health-fail! "tool" {"session_id" "s1"} (ex-info "boom" {}))
-    (let [since (second (re-find #"since (\S+):" (rec/health-line)))]
-      (is (str/ends-with? (rec/health-line) ": boom"))
-      (rec/health-fail! "stop" {"session_id" "s1"} (ex-info "bang" {}))
-      (is (= (str "trace failing since " since ": bang") (rec/health-line))))
-    (rec/health-ok!)
-    (is (= "trace ok" (rec/health-line)))))
+    (is (= "trace ok" (health/line)))
+    (health/fail! :worker "tool" {"session_id" "s1"} (ex-info "boom" {}))
+    (let [since (second (re-find #"since (\S+):" (health/line)))]
+      (is (str/ends-with? (health/line) ": boom"))
+      (health/fail! :worker "stop" {"session_id" "s1"} (ex-info "bang" {}))
+      (is (= (str "trace worker failing since " since ": bang") (health/line))))
+    (health/ok! :worker)
+    (is (= "trace ok" (health/line)))))
 
 (deftest model-and-usage-from-the-payload
   (let [proj (fresh!)]

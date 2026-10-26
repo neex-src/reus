@@ -25,10 +25,11 @@
 (def windows "Bytes read from the end of the file: every look, then the last one again wider." [(* 256 1024) (* 8 1024 1024)])
 
 (defn tail-lines
-  "{:size n :lines [...]} the whole lines within the last `window` bytes of f."
-  [f window]
+  "{:size n :lines [...]} the whole lines within the last `window` bytes of f (of its first `upto`
+  bytes when given: the file as it was then)."
+  [f window & [upto]]
   (with-open [r (RandomAccessFile. (str f) "r")]
-    (let [size (.length r)
+    (let [size (cond-> (.length r) upto (min upto))
           start (max 0 (- size window))
           bs (byte-array (- size start))]
       (.seek r start)
