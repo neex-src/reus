@@ -205,6 +205,11 @@
     li.classList.remove('hidden');
     const d = li.querySelector('details.step-d');
     if (d) d.open = true;
+    // a step of an agent run sits inside its Agent step: open every step around it too
+    for (let p = li.parentElement; p; p = p.parentElement) {
+      if (p.tagName === 'DETAILS') p.open = true;
+      if (p.classList && p.classList.contains('step')) p.classList.remove('hidden');
+    }
     li.scrollIntoView({ block: 'start' });
   }
   window.addEventListener('hashchange', openHash);
@@ -232,15 +237,16 @@
     state.addEventListener('click', () => { if (state.classList.contains('fresh')) reload(); });
     async function poll() {
       try {
-        const r = await fetch('/x/tips', { cache: 'no-store' });
+        const m = new URLSearchParams(location.search).get('m');
+        const r = await fetch('/x/tips' + (m ? '?m=' + encodeURIComponent(m) : ''), { cache: 'no-store' });
         const j = await r.json();
         const sig = JSON.stringify(j);
         if (last && sig !== last) {
           const newest = (j.live || []).join(', ');
           if (follow.checked) {
-            const latest = (j.live || []).map((b) => b.match(/-p(\d+)$/)).filter(Boolean).map((m) => m[1]).sort().pop();
-            if (latest && !location.pathname.endsWith('/' + latest) && location.pathname.startsWith('/p/')) {
-              location.href = '/p/' + latest + location.search;
+            const here = decodeURIComponent(location.pathname.replace(/^\/p\//, ''));
+            if (j.latest && location.pathname.startsWith('/p/') && here !== j.latest) {
+              location.href = '/p/' + encodeURIComponent(j.latest) + location.search;
             } else reload();
             return;
           }

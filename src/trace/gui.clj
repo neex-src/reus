@@ -11,13 +11,13 @@
 
   Routes
     /?m=a                the newest prompt of a (default: see default-mains)
-    /p/NN?m=a,b          prompt NN of a,b
+    /p/<session8>@NN?m=a    prompt NN of a session of a
     /files?m=a           every file a edited
     /file?m=a&path=P     every edit of P, in order: the file's evolution
     /x/show?r=REV        git cat-file -p REV (a blob sha, or <commit>:<path>)
     /x/diff?c=SHA[&path=P]   that commit's change outside reads/ and doto.md
     /x/net?m=a&p=NN      the net change of a prompt
-    /x/tips              branch tips + running prompts, for the live poll"
+    /x/tips?m=a          a's branch tips, running prompts, newest prompt: the live poll"
   (:require [babashka.fs :as fs]
             [cheshire.core :as json]
             [clojure.java.io :as io]
@@ -31,12 +31,52 @@
            [java.time Instant ZoneId]
            [java.time.format DateTimeFormatter]))
 
-(defn- newest-prompt
-  "The prompt branch with the newest tip commit."
-  [tips]
-  (let [ours (set (filter #(re-find #"-p\d+$" %) (keys tips)))]
-    (->> (str/split-lines (git "for-each-ref" "--sort=-committerdate" "--format=%(refname:short)" "refs/heads"))
-         (filter ours) first)))
+(defn- newest-session
+  "The project whose session branch has the newest tip commit."
+  []
+  (->> (str/split-lines (git "for-each-ref" "--sort=-committerdate" "--format=%(refname:short)" "refs/heads"))
+       (some #(second (re-matches #"(.+)/s/[^/]+" %)))))
+
+(defn- agent-id? [id] (str/includes? (first (str/split id #"@")) "-"))
+
+(defn- session-ids
+  "Ids of the prompts of the given projects' sessions (agent runs nest under their Agent step), oldest first."
+  [tips ms]
+  (remove agent-id? (mapcat #(prompt-nos tips %) ms)))
+
+(defn- pno [id] (second (str/split id #"@" 2)))
+(defn- sess-of [id] (first (str/split id #"@" 2)))
+
+(defn- parent-id
+  "The session prompt an id belongs to: itself, or for an agent run the prompt it was started in."
+  [id]
+  (str (first (str/split (sess-of id) #"-")) "@" (first (str/split (str (pno id)) #"-"))))
+
+(defn- chip-text
+  "A prompt id as a short chip: NN and the start of its session."
+  [id]
+  (let [p (parent-id id)] (str (pno p) " · " (subs (sess-of p) 0 (min 4 (count (sess-of p)))))))
+
+(defn- live-in
+  "The running prompt ids (live-branches) of projects ms: those whose session or agent branch is one of theirs."
+  [tips ms]
+  (set (filter (fn [id] (let [s (sess-of id)]
+                          (some #(get tips (str % (if (str/includes? s "-") "/a/" "/s/") s)) ms)))
+               (live-branches))))
+
+(defn- running?
+  "Is the session prompt id, or an agent run started in it, among the live ids?"
+  [live id]
+  (or (contains? live id)
+      (let [pre (str (sess-of id) "-") no (str (pno id) "-a")]
+        (some #(and (str/starts-with? (sess-of %) pre) (str/starts-with? (str (pno %)) no)) live))))
+
+(defn- agent-ids
+  "{agent id, prompt id} of the agent runs of a session (by its prompt id) in project main."
+  [tips main id]
+  (let [pre (str (sess-of id) "-")]
+    (into {} (keep #(let [s (sess-of %)] (when (str/starts-with? s pre) [(subs s (count pre)) %])))
+          (prompt-nos tips main))))
 
 (defn- stamp [secs]
   (when secs
@@ -53,7 +93,20 @@
       (format "%d:%02d" (quot secs 60) (mod secs 60)))
     ""))
 (defn- clip [s n] (let [s (str/replace (str s) #"\s+" " ")] (if (> (count s) n) (str (subs s 0 n) "…") s)))
+(defn- lines-text [n] (str n (if (= 1 n) " line" " lines")))
 (defn- first-line [s] (first (str/split-lines (str s))))
+
+(defn- prompt-title
+  "What a prompt that Claude Code wrote, not the user, says: a task notification by its summary, an agent's
+  hand-back by its agent; nil for a typed prompt."
+  [text]
+  (let [t (str/triml (str text))
+        tag (fn [k] (some-> (re-find (re-pattern (str "(?s)<" k ">(.*?)</" k ">")) t) second str/trim))]
+    (cond
+      (str/starts-with? t "<task-notification>")
+      (str "Notification: " (or (tag "summary") (str "task " (tag "task-id") " " (tag "status"))))
+      (str/starts-with? t "<agent-message ")
+      (str "Agent " (second (re-find #"^<agent-message from=\"([^\"]+)\"" t)) " handed back its report"))))
 
 (defn- kind-class [s] (str "k-" (if (:err s) "err" (name (:kind s)))))
 
@@ -111,12 +164,15 @@
 (declare step-view)
 
 (defn- agent-run
-  "The recorded history of a subagent run (its own branch), nested under the Agent step."
-  [tips main nn s session]
-  (when-let [d (and (:agent-id s) (prompt-data tips main (str nn "-a" (:agent-id s))))]
+  "The recorded history of a subagent run (its own branch), nested under the Agent step, or under
+  its prompt when no Agent step names it (title given)."
+  [tips main nn s session & [title]]
+  (when-let [d (and (:agent-id s)
+                    (some->> (get (agent-ids tips main nn) (:agent-id s)) (prompt-data tips main)))]
     [:div.agent-run
-     [:div.reply-h (str "Agent run · " (count (:steps d)) " steps")]
-     [:ol.steps.nested (for [s2 (:steps d)] (step-view main (str nn "-a" (:agent-id s)) (:t0 d) s2 session tips))]
+     [:div.reply-h (or title (str "Agent run · " (count (:steps d)) " steps"))]
+     (when title [:div.md.brief (:prompt d)])
+     [:ol.steps.nested (for [s2 (:steps d)] (step-view main (:nn d) (:t0 d) s2 session tips))]
      (when (:reply d) [:details [:summary "Agent's last message"] [:div.md (:reply d)]])]))
 
 (defn- step-view [main nn t0 s session tips]
@@ -133,7 +189,7 @@
        [:span.meta
         (when agent (agent-badges agent))
         (when (= :edit (:kind s)) [:span.delta [:b.add (str "+" (:add s))] " " [:b.del (str "−" (:del s))]])
-        (when (:lines s) [:span.lines (str (:lines s) " lines")])
+        (when (:lines s) [:span.lines (lines-text (:lines s))])
         [:span.t (str "+" (mmss (- (:at s) t0)))]]]
       [:div.step-body
        (when agent
@@ -150,28 +206,32 @@
        (case (:kind s)
          :edit (if (empty? (:files s))
                 (when (:result s)
-                  (lazy (str "Output · " (:lines s) " lines")
-                        (str "/x/show?r=" (enc (str (:sha s) ":" (:result s)))) :kind "text"))
+                  (lazy (str "Output · " (lines-text (:lines s)))
+                        (str "/x/show?r=" (:result s)) :kind "text"))
                 (list
                 (lazy (str "Diff · " (str/join ", " (map :path (:files s))))
                       (str "/x/diff?c=" (:sha s)) :kind "diff" :open? true)
                 [:div.after
                  (for [f (:files s)]
-                   (lazy (str "File after this edit · " (:path f))
+                   (if (:gone f)
+                     [:div.note "Deleted by this step: " [:span.file (:path f)]]
+                     (lazy (str "File after this edit · " (:path f))
                          (str "/x/show?r=" (enc (str (:sha s) ":" (:path f))))
-                         :kind "code" :lang (ext-lang (:path f)) :cls "nested"))]))
+                         :kind "code" :lang (ext-lang (:path f)) :cls "nested")))]))
          :read (list
                 (if (:result s)
-                  (lazy (str "Output · " (:lines s) " lines")
-                        (str "/x/show?r=" (enc (str (:sha s) ":" (:result s)))) :kind "text" :open? true)
-                  [:div.note "Same output as the last time this file was read, so nothing new was recorded."])
+                  (lazy (str "Output · " (lines-text (:lines s)))
+                        (str "/x/show?r=" (:result s)) :kind "text" :open? true)
+                  [:div.note (if (:silent s) "It printed nothing." "No output recorded.")])
+                (when (:unheld s)
+                  [:div.note "The file itself is not in the tree recorded for this step (an ignored file, or one outside the worktree): the output above is what was read."])
                 (when (:blob s)
-                 (lazy [:span "File as it was when read · " [:span.file (:read-file s)] " · blob " [:code.sha (subs (:blob s) 0 10)]]
-                      (str "/x/show?r=" (:blob s)) :kind "code" :lang (ext-lang (:read-file s)) :cls "nested blob")))
+                 (lazy [:span "File as it was when read · " [:span.file (:read-file s)]]
+                      (str "/x/show?r=" (enc (:blob s))) :kind "code" :lang (ext-lang (:read-file s)) :cls "nested blob")))
          :run (if (:result s)
-                (lazy (str "Output · " (:lines s) " lines")
-                      (str "/x/show?r=" (enc (str (:sha s) ":" (:result s)))) :kind "text" :open? true)
-                [:div.note "No output recorded."])
+                (lazy (str "Output · " (lines-text (:lines s)))
+                      (str "/x/show?r=" (:result s)) :kind "text" :open? true)
+                [:div.note (if (:silent s) "It printed nothing." "No output recorded.")])
          nil)
        (agent-run tips main nn s session)
        [:div.commit "commit " [:code (subs (:sha s) 0 10)] " · " (:subject s)]]]]))
@@ -187,14 +247,14 @@
      [:span.lbl (clip summary 200)]
      (when agent (agent-badges agent))
      (when-not (str/blank? result)
-       [:details [:summary "result · " (count (str/split-lines result)) " lines"] (code-block result "plaintext")])]))
+       [:details [:summary "result · " (lines-text (count (str/split-lines result)))] (code-block result "plaintext")])]))
 
 (defn- notes-of
   "The session's notifications between this prompt's start and the next prompt of the same session."
   [tips d]
   (when-let [session (:session d)]
     (let [end (->> (all-prompts tips (:main d))
-                   (filter #(and (= session (:session %)) (> (:t0 %) (:t0 d))))
+                   (filter #(and (= session (:session %)) (not (agent-id? (:nn %))) (> (:t0 %) (:t0 d))))
                    (map :t0) sort first)]
       (filter #(and (>= (:at %) (:t0 d)) (or (nil? end) (< (:at %) end)))
               (agents/notifications session)))))
@@ -232,7 +292,7 @@
   whose prompt is newest."
   [tips]
   (if (central?)
-    (some-> (newest-prompt tips) (str/replace #"-p\d+$" "") vector)
+    (some-> (newest-session) vector)
     (mains tips)))
 
 (defn- topbar [tips current ms]
@@ -253,8 +313,8 @@
     [:label [:input#follow {:type "checkbox"}] " follow live"]]])
 
 (defn- prompt-index [tips ms current]
-  (let [live (live-branches)
-        nos (sort-by parse-long (distinct (mapcat #(prompt-nos tips %) ms)))]
+  (let [live (live-in tips ms)
+        nos (session-ids tips ms)]
     [:aside.index
      [:div.legend (for [[k t] kinds] [:span {:class (str "lg k-" (name k))} [:i] t])]
      [:ol
@@ -262,14 +322,14 @@
             :let [ds (keep #(prompt-data tips % nn) ms)
                   text (some :prompt ds)]]
         [:li
-         [:a {:class (str "pr" (when (= nn current) " cur")) :href (str "/p/" nn "?" (m-param ms))}
-          [:span.nn nn]
-          [:span.ptext (clip text 90)
-           (when (central?) [:span.when (some-> (some :t0 ds) stamp)])]
+         [:a {:class (str "pr" (when (= nn current) " cur")) :href (str "/p/" (enc nn) "?" (m-param ms))}
+          [:span.nn (pno nn)]
+          [:span.ptext (clip (or (prompt-title text) text) 90)
+           (when (central?) [:span.when (some-> (some :t0 ds) stamp) " · " [:span.sess (sess-of nn)]])]
           [:span.tapes
-           (for [d ds :let [b (str (:main d) "-p" nn)]]
+           (for [d ds]
              [:span.trow
-              [:span.mname (:main d) (when (live b) [:i.pulse])]
+              [:span.mname (:main d) (when (running? live nn) [:i.pulse])]
               (tape (take 64 (:steps d)) :cls "mini")
               [:span.cnt (count (:steps d)) (when (> (count (:steps d)) 64) [:em "+"])]])]]])]]))
 
@@ -279,16 +339,18 @@
         central (central?)
         ds (keep #(prompt-data tips % nn) ms)
         text (some :prompt ds)
-        live (live-branches)]
-    (page (str "Prompt " nn " · trace")
+        live (live-in tips ms)]
+    (page (str "Prompt " (pno nn) " · trace")
           [:div.app
            (topbar tips :prompts ms)
            [:div.shell
             (prompt-index tips ms nn)
             [:main
              [:section.head
-              [:div.pno [:span "Prompt"] [:b nn]]
-              [:div.md.prompt-text text]
+              [:div.pno [:span "Prompt"] [:b (pno nn)]]
+              (if-let [t (prompt-title text)]
+                [:div.prompt-text [:p t] [:details [:summary "as Claude Code wrote it"] (code-block text "xml")]]
+                [:div.md.prompt-text text])
               (for [d ds :when (:session d)]
                 [:p.where (:main d) " · " (stamp (:t0 d)) " · in " [:code (:cwd d)] " · session " [:code (subs (:session d) 0 (min 8 (count (:session d))))]])
               [:table.compare
@@ -300,7 +362,7 @@
                    (for [[k _] kinds] [:td {:class (str "c-" (name k))} (get c k 0)])
                    [:td [:span.add (str "+" (reduce + (map :add (:steps d))))] " " [:span.del (str "−" (reduce + (map :del (:steps d))))]]
                    [:td (mmss (- (:t1 d) (:t0 d)))
-                    (when (live (str (:main d) "-p" nn)) [:span.running [:i.pulse] "running"])]])]]
+                    (when (running? live nn) [:span.running [:i.pulse] "running"])]])]]
               [:div.tools
                [:div.filters "Show "
                 (for [[k t] kinds] [:label {:class (str "f k-" (name k))} [:input {:type "checkbox" :checked true :data-filter (name k)}] t])]
@@ -308,15 +370,23 @@
                 [:button {:type "button" :data-act "open"} "Expand all"]
                 [:button {:type "button" :data-act "close"} "Collapse all"]
                 (when (and (not central) (> (count all) 1))
-                  (for [m all] [:a.solo {:href (str "/p/" nn "?m=" (enc m))} (str "Only " m)]))
-                (when (and (not central) (< (count ds) (count all))) [:a.solo {:href (str "/p/" nn)} "All side by side"])]]]
+                  (for [m all] [:a.solo {:href (str "/p/" (enc nn) "?m=" (enc m))} (str "Only " m)]))
+                (when (and (not central) (< (count ds) (count all))) [:a.solo {:href (str "/p/" (enc nn))} "All side by side"])]]]
              [:div.cols {:style (str "--n:" (max 1 (count ds)))}
               (for [d ds :let [{:keys [main steps t0]} d]]
                 [:section.col
                  [:h2 main [:small (count steps) " steps · " (mmss (- (:t1 d) t0))]]
                  (tape steps :href-fn #(str "#" main "-" nn "-" (:i %)) :cls "big")
-                 (lazy "Net change of this prompt" (str "/x/net?m=" (enc main) "&p=" nn) :kind "diff" :cls "net")
+                 (lazy "Net change of this prompt" (str "/x/net?m=" (enc main) "&p=" (enc nn)) :kind "diff" :cls "net")
                  [:ol.steps (for [s steps] (step-view main nn t0 s (:session d) tips))]
+                 (let [nested (set (keep :agent-id steps))
+                       loose (remove (comp nested key) (filter #(= (pno (val %)) (str (pno nn) "-a" (key %))) (agent-ids tips main nn)))]
+                   (when (seq loose)
+                     [:div.events
+                      [:div.reply-h (str "Agent runs with no Agent step here · " (count loose))]
+                      (for [[aid _] loose]
+                        (agent-run tips main nn {:agent-id aid} (:session d)
+                                   (str "Agent " aid (when-let [a (agents/info (:session d) aid {})] (str " · " (:type a))))))]))
                  (when-let [ns (seq (notes-of tips d))]
                    [:div.events
                     [:div.reply-h (str "Background events · " (count ns))]
@@ -325,7 +395,7 @@
                   [:div.reply-h "Reply"]
                   (if (:reply d)
                     [:div.md (:reply d)]
-                    [:div.note (if (live (str main "-p" nn)) "Still working…" "No reply recorded.")])]])]]]]
+                    [:div.note (if (running? live nn) "Still working…" "No reply recorded.")])]])]]]]
           :watch {:mains ms})))
 
 (defn- files-page [tips main]
@@ -351,12 +421,13 @@
                  [:td [:a {:href (str "/file?m=" (enc main) "&path=" (enc (:path r)))} (:path r)]]
                  [:td.num (:n r)]
                  [:td.num [:span.add (str "+" (:add r))] " " [:span.del (str "−" (:del r))]]
-                 [:td (for [nn (:prompts r)] [:a.chip {:href (str "/p/" nn "?m=" (enc main))} nn])]])]]]])))
+                 [:td (for [nn (distinct (map parent-id (:prompts r)))] [:a.chip {:href (str "/p/" (enc nn) "?m=" (enc main)) :title (str "session " (sess-of nn))} (chip-text nn)])]])]]]])))
 
 (defn- file-page [tips main path]
   (let [ds (all-prompts tips main)
         edits (for [d ds s (:steps d) :when (some #(= path (:path %)) (:files s))] [d s])
-        others (remove #{main} (mains tips))]
+        others (when-not (central?) (remove #{main} (mains tips)))
+        now (or (some-> (last edits) second :sha) (get tips (str main "/main")))]
     (page (str path " · " main)
           [:div.app
            (topbar tips main [main])
@@ -364,19 +435,28 @@
             [:h1.path path]
             [:p.sub (count edits) " edits by " main ". "
              (for [o others] [:a {:href (str "/file?m=" (enc o) "&path=" (enc path))} (str "Same file in " o)])]
-            (lazy (str "The file now, at " main "'s tip")
-                  (str "/x/show?r=" (enc (str (get tips main) ":" path))) :kind "code" :lang (ext-lang path) :cls "nested")
+            (lazy "The file after its last edit here"
+                  (str "/x/show?r=" (enc (str now ":" path))) :kind "code" :lang (ext-lang path) :cls "nested")
             [:ol.evo
              (for [[d s] edits]
                [:li {:class (str "evo-item " (kind-class s))}
                 [:div.evo-h
-                 [:a.chip {:href (str "/p/" (:nn d) "?m=" (enc main) "#" main "-" (:nn d) "-" (:i s))} (str "prompt " (:nn d) " · step " (:i s))]
+                 [:a.chip {:href (str "/p/" (enc (parent-id (:nn d))) "?m=" (enc main) "#" (enc (str main "-" (:nn d) "-" (:i s))))}
+                  (str "prompt " (chip-text (:nn d)) (when (not= (:nn d) (parent-id (:nn d))) " · agent") " · step " (:i s))]
                  [:span.tool (:tool (:call s))]
-                 [:span.ptext (clip (:prompt d) 110)]
+                 [:span.ptext (clip (or (prompt-title (:prompt d)) (:prompt d)) 110)]
                  [:span.delta [:b.add (str "+" (:add s))] " " [:b.del (str "−" (:del s))]]]
                 (lazy "Diff" (str "/x/diff?c=" (:sha s) "&path=" (enc path)) :kind "diff" :open? true)])]]])))
 
 ;; --- http -----------------------------------------------------------------
+
+(defn- not-recorded
+  "Pathspecs of what a diff leaves out: what the recorder adds beside the project's files
+  (.claude-trace/ here; reads/ and doto.md, the prompt, in a bench repo)."
+  []
+  (if (central?)
+    ["." ":(exclude).claude-trace"]
+    ["." ":(exclude)reads" ":(exclude)doto.md"]))
 
 (defn- query [req]
   (into {} (for [kv (str/split (or (:query-string req) "") #"&")
@@ -394,37 +474,45 @@
       (cond
         (= uri "/")
         (let [ms (or (some-> (get q "m") (str/split #",")) (default-mains tips))
-              newest (newest-prompt (select-keys tips (filter (fn [b] (some #(str/starts-with? b (str % "-p")) ms)) (keys tips))))]
+              newest (last (session-ids tips ms))]
           (if newest
-            {:status 302 :headers {"location" (str "/p/" (second (re-find #"-p(\d+)$" newest)) "?" (m-param ms))}}
+            {:status 302 :headers {"location" (str "/p/" (enc newest) "?" (m-param ms))}}
             (html (page "trace" [:div.app (topbar tips :prompts ms) [:main.wide [:p.note "No prompts in " g/*repo* " yet. Send a prompt in a traced session and refresh."]]]))))
 
-        (re-matches #"/p/\d+" uri)
-        (html (prompt-page tips (subs uri 3) (some-> (get q "m") (str/split #","))))
+        (re-matches #"/p/[^/]+" uri)
+        (html (prompt-page tips (URLDecoder/decode (subs uri 3) "UTF-8") (some-> (get q "m") (str/split #","))))
 
         (= uri "/files") (html (files-page tips (get q "m")))
         (= uri "/file") (html (file-page tips (get q "m") (get q "path")))
 
         (= uri "/x/show")
         (let [r (get q "r" "")]
-          (if (re-matches #"[0-9a-f]{7,40}(:[^\n]+)?" r) (text (git "cat-file" "-p" r)) bad))
+          (if (re-matches #"[0-9a-f]{7,40}(:[^\n]+)?" r)
+            (let [{:keys [exit out]} (g/git* {} "cat-file" "-p" r)]
+              (if (zero? exit)
+                (text out)
+                {:status 404 :headers {"content-type" "text/plain; charset=utf-8"}
+                 :body (str "not in the trace repo: " r)}))
+            bad))
 
         (= uri "/x/diff")
         (let [c (get q "c" "")]
           (if (re-matches sha-re c)
             (text (if-let [path (get q "path")]
                     (git "show" "--format=" "--patch" c "--" path)
-                    (git "show" "--format=" "--patch" c "--" "." ":(exclude)reads" ":(exclude)doto.md")))
+                    (apply git "show" "--format=" "--patch" c "--" (not-recorded))))
             bad))
 
         (= uri "/x/net")
         (if-let [d (prompt-data tips (get q "m") (get q "p"))]
-          (text (git "diff" (:fork d) (:tip d) "--" "." ":(exclude)reads" ":(exclude)doto.md"))
+          (text (apply git "diff" (:fork d) (:end d) "--" (not-recorded)))
           bad)
 
         (= uri "/x/tips")
-        {:status 200 :headers {"content-type" "application/json"}
-         :body (json/generate-string {:tips tips :live (sort (live-branches))})}
+        (let [ms (or (some-> (get q "m") (str/split #",")) (default-mains tips))
+              own (into (sorted-map) (filter (fn [[b _]] (some #(str/starts-with? b (str % "/")) ms)) tips))]
+          {:status 200 :headers {"content-type" "application/json" "cache-control" "no-store"}
+           :body (json/generate-string {:tips own :live (sort (live-in tips ms)) :latest (last (session-ids tips ms))})})
 
         (#{"/static/app.css" "/static/app.js" "/static/shell.js"} uri)
         {:status 200

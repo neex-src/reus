@@ -69,3 +69,14 @@
             (if-let [size (and (not (str/ends-with? header "missing")) (parse-long (or size "")))]
               (recur (+ nl 1 size 1) more (assoc acc r (String. bs (inc nl) (int size) "UTF-8")))
               (recur (inc nl) more acc))))))))
+
+(defn have
+  "The revs among revs that git can resolve (a blob sha, <commit>:<path>), in one cat-file process."
+  [revs]
+  (if (empty? revs)
+    #{}
+    (let [out (:out (p/shell {:out :string :err :string :continue true :dir *repo*
+                              :in (str (str/join "\n" revs) "\n")}
+                             "git" "cat-file" "--batch-check"))]
+      (set (keep (fn [[r l]] (when-not (str/ends-with? l " missing") r))
+                 (map vector revs (str/split-lines out)))))))
