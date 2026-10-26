@@ -432,13 +432,22 @@
         (store/kv! (:s x) :agent-uses (get use "id") agent-id)
         (get-in use ["input" "prompt"])))))
 
+(def brief-wait-ms
+  "How long the worker waits for an agent's brief to reach a transcript: Claude Code writes the agent's
+  file after SubagentStart returns, and a warm worker gets to the event within milliseconds."
+  5000)
+
 (defn- agent-brief
-  "The brief a subagent was given: the first message of its transcript when that is there yet,
-  else the prompt of the parent's Agent call (the agent's file is written after SubagentStart)."
+  "The brief a subagent was given: the first message of its transcript, else the prompt of the parent's
+  Agent call, as soon as either is written (at most brief-wait-ms)."
   [x session-id agent-id transcript]
-  (or (try (brief-from-agent-file session-id agent-id transcript) (catch Exception _ nil))
-      (try (brief-from-parent x session-id agent-id transcript) (catch Exception _ nil))
-      ""))
+  (let [deadline (+ (System/currentTimeMillis) brief-wait-ms)]
+    (loop []
+      (or (not-blank (try (brief-from-agent-file session-id agent-id transcript) (catch Exception _ nil)))
+          (not-blank (try (brief-from-parent x session-id agent-id transcript) (catch Exception _ nil)))
+          (if (and (:live? x) transcript (fs/exists? transcript) (< (System/currentTimeMillis) deadline)) ; a real session
+            (do (Thread/sleep 100) (recur))
+            "")))))
 
 (defn on-subagent-start [x {:strs [session_id agent_id agent_type cwd transcript_path] :as in}]
   (when agent_id
