@@ -52,6 +52,7 @@
   (advance! [s ref id] "Point a full ref at id.")
   (note! [s ref id content] "Keep content as the note of commit id in notes ref.")
   (notes! [s id ref->content] "Keep several notes of commit id, {notes-ref content}.")
+  (trailer [s id k] "The value of trailer k of commit id, or nil (a batch: nil, its kv state is never cut off).")
   (kv [s ns k] "The value of k in ns, or nil.")
   (kv! [s ns k v] "Set k in ns; nil deletes.")
   (kv-all [s ns] "{k v} of ns."))
@@ -117,7 +118,7 @@
   repo thus never depends on a project repo's objects."
   [repo from tree & [since]]
   (when (and from tree (not (has-object? repo tree)))
-    (let [since (when (and since (has-object? repo since)) since)
+    (let [since (when (and since (has-object? repo since) (has-object? from since)) since) ; ^since must be known to both
           pack (p/process {:dir (str from) :in (str tree "\n" (when since (str "^" since "\n")))
                            :err :string :extra-env g/*env*}
                           "git" "pack-objects" "--revs" "--stdout" "-q")
@@ -198,6 +199,8 @@
   (advance! [_ ref id] (in repo (git! "update-ref" ref id)))
   (note! [_ ref id content] (live-notes! repo id {ref content}))
   (notes! [_ id ref->content] (live-notes! repo id ref->content))
+  (trailer [_ id k]
+    (in repo (not-empty (git "log" "-1" (str "--format=%(trailers:key=" k ",valueonly,separator=%x2C)") id))))
   (kv [_ ns k] (files/kv-read repo ns k))
   (kv! [_ ns k v] (files/kv-write! repo ns k v))
   (kv-all [_ ns]
@@ -306,6 +309,7 @@
     nil)
   (notes! [this id ref->content]
     (doseq [[ref content] ref->content] (note! this ref id content)))
+  (trailer [_ _ _] nil)
   (kv [_ ns k] (get-in @st [:kv ns (clean-key k)]))
   (kv! [_ ns k v]
     (swap! st (fn [s] (if (nil? v) (update-in s [:kv ns] dissoc (clean-key k)) (assoc-in s [:kv ns (clean-key k)] v))))

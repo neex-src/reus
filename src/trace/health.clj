@@ -21,19 +21,27 @@
 
 (defn- file [part] (str (fs/path g/*repo* ".git" "trace-health" (str (name part) ".edn"))))
 
+(def clears-ms "A failure of one worktree not seen again this long is cleared by any success." (* 10 60 1000))
+
+(defn- read-part [part] (try (edn/read-string (slurp (file part))) (catch Throwable _ nil)))
+
 (defn fail!
-  "Part (:hook or :worker) failed on an event: the first failing-since is kept while it goes on."
-  [part event input e]
-  (let [f (file part)
-        since (or (try (:failing-since (edn/read-string (slurp f))) (catch Throwable _ nil))
-                  (str (java.time.Instant/now)))]
-    (files/spit-atomic f (pr-str {:failing-since since :reason (or (ex-message e) (str e)) :event event
-                                  :session (get input "session_id")}))))
+  "Part (:hook or :worker) failed on an event (of the worktree root, when it is about one): the first
+  failing-since is kept while it goes on."
+  [part event input e & [root]]
+  (let [since (or (:failing-since (read-part part)) (str (java.time.Instant/now)))]
+    (files/spit-atomic (file part) (pr-str {:failing-since since :at (System/currentTimeMillis) :root root
+                                            :reason (or (ex-message e) (str e)) :event event
+                                            :session (get input "session_id")}))))
 
 (defn ok!
-  "Part succeeded: healthy again."
-  [part]
-  (fs/delete-if-exists (file part)))
+  "Part succeeded (on worktree root): healthy again, unless what failed is another worktree that
+  failed in the last clears-ms (one sick worktree stays visible while the others are fine)."
+  [part & [root]]
+  (when-let [h (read-part part)]
+    (when (or (nil? (:root h)) (= root (:root h))
+              (> (- (System/currentTimeMillis) (or (:at h) 0)) clears-ms))
+      (fs/delete-if-exists (file part)))))
 
 (defn log!
   "One line in .git/trace-errors.log."

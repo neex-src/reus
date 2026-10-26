@@ -13,6 +13,7 @@
             [babashka.process :as p]
             [cheshire.core :as json]
             [clojure.edn :as edn]
+            [clojure.string :as str]
             [trace.disk :as disk]
             [trace.files :as files]
             [trace.git :as g]
@@ -29,10 +30,12 @@
   (try (disk/live-snapshot repo wt {:ms nil}) (catch Exception e (health/log! "worker warm" "" {} e))))
 
 (defn- record-entry! [repo f]
-  (let [{:keys [event raw obs]} (edn/read-string (slurp f))
-        input (try (json/parse-string raw) (catch Exception _ {}))]
+  (let [{:keys [event raw obs unreadable]} (try (edn/read-string (slurp f)) (catch Throwable e {:unreadable e}))
+        input (try (json/parse-string raw) (catch Throwable _ {}))]
     (try
-      (rec/handle-in! {:s (store/live repo) :d (disk/live repo) :live? true} event input {:raw raw :obs obs})
+      (when unreadable (throw unreadable)) ; it goes aside like any other failure, the rest go on
+      (rec/handle-in! {:s (store/live repo) :d (disk/live repo) :live? true} event input
+                      {:raw raw :obs obs :entry (str (fs/file-name f))})
       (when (and (:slow? obs) (:common (:wt obs))) (warm! repo (:wt obs)))
       (fs/delete f)
       (health/ok! :worker)
@@ -66,12 +69,23 @@
   (or (files/try-file-lock (files/worker-lock repo) #(drain* repo))
       (do (wait-empty repo (or ms 60000)) 0)))
 
+(defn- sweep!
+  "Temp files a hook killed mid-write left in the spool (its event is lost; the file must not stay)."
+  [repo]
+  (let [d (files/spool-dir repo) old (- (System/currentTimeMillis) 60000)]
+    (when (fs/directory? d)
+      (doseq [f (fs/list-dir d) :when (and (files/tmp? f) (< (.toMillis (fs/last-modified-time f)) old))]
+        (fs/delete-if-exists f)))))
+
 (defn- gc! [repo]
   (let [stamp (files/kv-read repo :prev "gc-at")
         now (System/currentTimeMillis)]
     (when (or (nil? stamp) (> (- now (or (parse-long stamp) 0)) gc-every-ms))
       (files/kv-write! repo :prev "gc-at" (str now))
-      (p/shell {:dir (str repo) :out :string :err :string :continue true} "git" "gc" "--auto" "--quiet"))))
+      (sweep! repo)
+      (let [r (p/shell {:dir (str repo) :out :string :err :string :continue true} "git" "gc" "--auto" "--quiet")]
+        (when-not (and (zero? (:exit r)) (str/blank? (:err r)))
+          (health/log! "worker gc" "" {} (ex-info (str "git gc --auto: exit " (:exit r) " " (str/trim (str (:err r)))) {})))))))
 
 (defn run!
   "Drain repo while events come; return after idle-ms without any. Nil at once when another worker drains it."

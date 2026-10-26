@@ -145,17 +145,23 @@
   "The tree of the worktree at root, hashed into the trace repo through a private index of its own.
   Under an OS lock per index, so a stale git `.lock` beside it is a dead git's and is removed. A tree
   that cannot be written (an index naming a blob the trace repo lacks) gets one fresh index, which
-  re-hashes everything; a second failure throws. Hashing longer than ms throws."
+  re-hashes everything; a second failure throws. All of it (waiting for the lock included) within ms,
+  or it throws {:slow true}: the hook must be done well before Claude Code's 15 s."
   [repo {:keys [root common]} & [{:keys [ms] :or {ms snapshot-ms}}]]
   (let [key (project-name root)
         idx (str (fs/path repo ".git" "trace-index" key))
         env {"GIT_INDEX_FILE" idx "GIT_OBJECT_DIRECTORY" (str (fs/path repo ".git" "objects"))
              "GIT_OPTIONAL_LOCKS" "0"}
+        deadline (when ms (+ (System/currentTimeMillis) ms))
+        left #(when deadline (max 1 (- deadline (System/currentTimeMillis))))
+        slow #(throw (ex-info (str "snapshot of " root ": " %) {:slow true :root root}))
         attempt (fn []
-                  (let [add (run-git root env ms "add" "-A" "--ignore-errors")]
-                    (when (:timeout add) (throw (ex-info (str "snapshot of " root ": " (:err add)) {:slow true :root root})))
-                    (run-git root env ms "write-tree")))]
-    (files/with-file-lock (str idx ".oslock") ms
+                  (let [add (run-git root env (left) "add" "-A" "--ignore-errors")]
+                    (when (:timeout add) (slow (:err add)))
+                    (let [w (run-git root env (left) "write-tree")]
+                      (when (:timeout w) (slow (:err w)))
+                      w)))]
+    (files/with-file-lock (str idx ".oslock") (left)
       (fn []
         (fs/delete-if-exists (str idx ".lock"))
         (let [r (attempt)
@@ -163,7 +169,7 @@
           (if (zero? (:exit r))
             {:base (str/trim (:out r))}
             (throw (ex-info (str "snapshot of " root " failed: " (str/trim (str (:err r)))) {:root root})))))
-      #(throw (ex-info (str "snapshot of " root ": its index stayed locked for " ms " ms") {:slow true :root root})))))
+      #(slow (str "its index stayed locked for " ms " ms")))))
 
 (defrecord Live [repo]
   Disk

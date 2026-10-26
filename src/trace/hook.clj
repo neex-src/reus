@@ -22,6 +22,7 @@
             [babashka.process :as p]
             [cheshire.core :as json]
             [clojure.java.io :as io]
+            [clojure.string :as str]
             [trace.disk :as disk]
             [trace.files :as files]
             [trace.git :as g]
@@ -31,13 +32,14 @@
 (defn- tkey [{:strs [agent_id session_id]}] (if agent_id (str "agent-" agent_id) session_id))
 
 (defn observe!
-  "The observation of an event, the session's (or agent's) last worktree kept for its next prompt."
+  "The observation of an event; the worktree a session (or agent) last wrote in is kept for its next
+  prompt and its reads."
   [repo event input]
   (let [key (tkey input)
         namer (observe/project-namer #(files/kv-read repo :projects %) #(files/kv-write! repo :projects %1 %2))
         name-of (fn [p] (files/with-file-lock (files/projects-lock repo) 5000 #(namer p) #(namer p)))
         obs (observe/observe (disk/live repo) event input {:last-root (files/kv-read repo :hookroot key) :name-of name-of})]
-    (when-let [r (and (#{"tool" "prompt" "subagent-start"} event) (get-in obs [:wt :root]))]
+    (when-let [r (and (#{"tool" "prompt"} event) (not (:read? obs)) (get-in obs [:wt :root]))]
       (when (not= r (files/kv-read repo :hookroot key)) (files/kv-write! repo :hookroot key r)))
     obs))
 
@@ -68,22 +70,29 @@
     (fs/create-dirs repo)
     (p/shell {:dir (str repo) :out :string :err :string} "git" "init" "-q" "-b" "_")))
 
-(defn record!
-  "Observe, spool and wake: what one hook call does with its event."
-  [repo event input raw]
-  (ensure-repo! repo)
+(defn- record-event! [repo event input raw]
   (let [obs (try (observe! repo event input)
                  (catch Throwable e
                    (health/log! "hook" event input e)
                    (health/fail! :hook event input e)
-                   {:at (System/currentTimeMillis) :error (or (ex-message e) (str e))}))]
+                   {:at (System/currentTimeMillis) :error (or (ex-message e) (str e))}))
+        root (get-in obs [:wt :root])]
     (spool! repo {:event event :raw raw :obs obs})
-    (if (or (:snap-error obs) (:error obs))
-      (when (:snap-error obs)
-        (health/log! "hook" event input (ex-info (:snap-error obs) {}))
-        (health/fail! :hook event input (ex-info (:snap-error obs) {})))
-      (health/ok! :hook))
+    (cond (:snap-error obs) (let [e (ex-info (:snap-error obs) {})]
+                              (health/log! "hook" event input e)
+                              (health/fail! :hook event input e root))
+          (:error obs) nil
+          :else (health/ok! :hook root))
     (wake! repo)))
+
+(defn record!
+  "Observe, spool and wake: what one hook call does with its event. A payload without a session
+  (not JSON, or not Claude Code's) is no event: logged, not spooled."
+  [repo event input raw]
+  (ensure-repo! repo)
+  (if (str/blank? (str (get input "session_id")))
+    (health/log! "hook" event input (ex-info (str "no session_id in the payload: " (subs (str raw) 0 (min 120 (count (str raw))))) {}))
+    (record-event! repo event input raw)))
 
 (defn -main [& [event]]
   (let [raw (slurp *in*)

@@ -207,17 +207,21 @@
       (ev "tool" {"session_id" "x1" "cwd" alpha "tool_name" "Write" "tool_input" {"file_path" (str (fs/path omega "o.txt"))} "tool_response" "ok"})
       (real omega "add" ".")
       (real omega "commit" "-q" "-m" "omega work")
-      (bash "x1" alpha (str "cd " omega " && git log"))
+      (bash "x1" alpha (str "cd " omega " && make"))
       (bash "x1" alpha "ls")
+      (spit (str (fs/path alpha "a.txt")) "a2\n")
+      (ev "tool" {"session_id" "x1" "cwd" alpha "tool_name" "Edit" "tool_input" {"file_path" (str (fs/path alpha "a.txt"))} "tool_response" "ok"})
       (ev "stop" {"session_id" "x1" "cwd" alpha "last_assistant_message" "both done"})
       (testing "the calls in omega are on omega's branch of the session, with omega's tree and HEAD"
-        (is (= ["response 00" "00.2 Bash:" "00.1 Write:" "prompt 00:"] (map #(re-find #"^\S+ \S+" %) (take 4 (subjects "omega/s/x1")))))
-        (is (= #{"a.txt" "o.txt"} (files-of "omega/s/x1~1")))
-        (is (= (real omega "rev-parse" "HEAD") (trailer "omega/s/x1~1" "Real-Head")))
-        (is (= "o.txt" (trailer "omega/s/x1~2" "File"))))
-      (testing "the call back in alpha is on alpha's, numbered on"
-        (is (= ["response 00" "00.3 Bash: ls" "prompt 00: work in both"] (take 3 (subjects "alpha/s/x1"))))
-        (is (= #{"a.txt"} (files-of "alpha/s/x1"))))
+        (is (= ["response 00" "00.3 Bash:" "00.2 Bash:" "00.1 Write:" "prompt 00:"] (map #(re-find #"^\S+ \S+" %) (take 5 (subjects "omega/s/x1")))))
+        (is (= #{"a.txt" "o.txt"} (files-of "omega/s/x1~2")))
+        (is (= (real omega "rev-parse" "HEAD") (trailer "omega/s/x1~2" "Real-Head")))
+        (is (= "o.txt" (trailer "omega/s/x1~3" "File"))))
+      (testing "a read in alpha after that moves nothing: it stays where the session wrote last"
+        (is (= "00.3 Bash: ls" (second (subjects "omega/s/x1")))))
+      (testing "the write back in alpha is on alpha's branch, numbered on"
+        (is (= ["response 00" "00.4 Edit: a.txt" "prompt 00: work in both"] (take 3 (subjects "alpha/s/x1"))))
+        (is (= "a2" (git "show" "alpha/s/x1~1:a.txt"))))
       (testing "omega's main is mirrored too"
         (is (= "omega work" (git "log" "-1" "--format=%s" "omega/main")))))))
 
@@ -238,15 +242,25 @@
 
 (deftest f9-mirror-resumes-without-duplicates
   (fresh!)
-  (let [proj (repo! (fs/path @dir "proj")) repo (str (fs/path @dir "traces"))]
+  (let [proj (repo! (fs/path @dir "proj")) repo (str (fs/path @dir "traces"))
+        main-subjects #(str/split-lines (git "log" "--format=%s" "proj/main"))]
     (binding [g/*repo* repo]
       (ev "prompt" {"session_id" "r1" "cwd" proj "prompt" "go"})
       (doseq [i (range 3)] (spit (str (fs/path proj "a.txt")) (str i)) (real proj "commit" "-qam" (str "real " i)))
-      (let [orig disk/commit-info n (atom 0)]
-        (with-redefs [disk/commit-info (fn [d p sha] (when (= 2 (swap! n inc)) (throw (ex-info "killed" {}))) (orig d p sha))]
-          (bash "r1" proj "ls")))
-      (bash "r1" proj "ls")
-      (is (= ["real 2" "real 1" "real 0" "init"] (map #(first (str/split % #"\n")) (str/split-lines (git "log" "--format=%s" "proj/main"))))))))
+      (testing "a mirror that fails half-way goes on from where it got to at the next event"
+        (let [orig disk/commit-info n (atom 0)]
+          (with-redefs [disk/commit-info (fn [d p sha] (when (= 2 (swap! n inc)) (throw (ex-info "boom" {}))) (orig d p sha))]
+            (bash "r1" proj "make")))
+        (is (= ["real 0" "init"] (main-subjects)))
+        (store/kv! (store/live repo) :mirror-failed "proj" {:tip (real proj "rev-parse" "HEAD") :at 0}) ; as after a while
+        (bash "r1" proj "make")
+        (is (= ["real 2" "real 1" "real 0" "init"] (main-subjects))))
+      (testing "cut off between a mirror commit and its state: the trace main tip's Real-Commit says it is done"
+        (spit (str (fs/path proj "a.txt")) "3") (real proj "commit" "-qam" "real 3")
+        (bash "r1" proj "make")
+        (store/kv! (store/live repo) :mirror "proj" (real proj "rev-parse" "HEAD~1"))
+        (bash "r1" proj "make")
+        (is (= ["real 3" "real 2" "real 1" "real 0" "init"] (main-subjects)))))))
 
 ;; --- F10 / F11: the hook does not wait for others, nor for the transcript ------------------------
 
@@ -311,3 +325,78 @@
       (ev "prompt" {"session_id" "o1" "cwd" proj "prompt" "second"})
       (bash "o1" proj "ls")
       (is (= ["01.1 Bash: ls" "prompt 01: second" "response 00"] (take 3 (subjects "proj/s/o1")))))))
+
+;; --- round 2 (.scratch/review/findings2.md) -------------------------------------------------------
+
+(deftest g1-an-entry-recorded-before-a-cut-off-is-not-recorded-again
+  (fresh!)
+  (let [proj (repo! (fs/path @dir "proj")) repo (str (fs/path @dir "traces"))]
+    (binding [g/*repo* repo]
+      (hook/ensure-repo! repo)
+      (let [spool (fn [event m] (hook/spool! repo {:event event :raw (json/generate-string m) :obs (hook/observe! repo event m)}))
+            _ (spool "prompt" {"session_id" "d1" "cwd" proj "prompt" "go"})
+            f (spool "tool" {"session_id" "d1" "cwd" proj "tool_name" "Bash" "tool_input" {"command" "make"} "tool_response" "ok"})
+            body (slurp f)]
+        (is (= 2 (worker/drain! repo)))
+        (spit f body) ; the worker recorded it and was killed before it could delete it
+        (worker/drain! repo)
+        (is (= ["00.1 Bash: make" "prompt 00: go"] (take 2 (subjects "proj/s/d1"))) "no second 00.2 for the same call")
+        (is (empty? (files/entries (files/spool-dir repo))))))))
+
+(deftest g2-mirror-after-the-project-pruned-the-tree-it-had
+  (fresh!)
+  (let [proj (repo! (fs/path @dir "proj")) repo (str (fs/path @dir "traces"))]
+    (binding [g/*repo* repo]
+      (ev "prompt" {"session_id" "m2" "cwd" proj "prompt" "go"})
+      (spit (str (fs/path proj "a.txt")) "only once\n") (real proj "commit" "-qam" "soon gone")
+      (bash "m2" proj "make")
+      (real proj "reset" "-q" "--hard" "HEAD~1")
+      (spit (str (fs/path proj "b.txt")) "b\n") (real proj "add" ".") (real proj "commit" "-qm" "after the rewrite")
+      (sh proj "git" "reflog" "expire" "--expire=now" "--all")
+      (sh proj "git" "gc" "-q" "--prune=now")
+      (spit (str (fs/path proj "untracked.txt")) "so the snapshot is not main's tree\n")
+      (bash "m2" proj "make")
+      (is (= "after the rewrite" (git "log" "-1" "--format=%s" "proj/main")))
+      (is (not (fs/exists? (fs/path repo ".git" "trace-errors.log")))))))
+
+(deftest g3-a-read-elsewhere-in-the-project-moves-nothing
+  (fresh!)
+  (let [proj (repo! (fs/path @dir "proj")) repo (str (fs/path @dir "traces")) wt (str (fs/path @dir "wt"))]
+    (real proj "worktree" "add" "-q" wt "-b" "x")
+    (spit (str (fs/path wt "only-on-x.txt")) "x\n")
+    (binding [g/*repo* repo]
+      (ev "prompt" {"session_id" "g3" "cwd" wt "prompt" "work on x"})
+      (spit (str (fs/path wt "a.txt")) "x1\n")
+      (ev "tool" {"session_id" "g3" "cwd" wt "tool_name" "Edit" "tool_input" {"file_path" (str (fs/path wt "a.txt"))} "tool_response" "ok"})
+      (bash "g3" wt (str "git -C " proj " log"))
+      (ev "tool" {"session_id" "g3" "cwd" wt "tool_name" "Read" "tool_input" {"file_path" (str (fs/path proj "a.txt"))} "tool_response" "ok"})
+      (ev "stop" {"session_id" "g3" "cwd" wt "last_assistant_message" "ok"})
+      (ev "prompt" {"session_id" "g3" "cwd" proj "prompt" "again"})
+      (spit (str (fs/path wt "a.txt")) "x2\n")
+      (ev "tool" {"session_id" "g3" "cwd" proj "tool_name" "Edit" "tool_input" {"file_path" (str (fs/path wt "a.txt"))} "tool_response" "ok"})
+      (let [wt-head (real wt "rev-parse" "HEAD")]
+        (is (every? #(= wt-head %) (map #(trailer (str "proj/s/g3~" %) "Real-Head") (range 0 5))) "all of it in the worktree")
+        (is (= ["a.txt"] (str/split-lines (git "diff" "--name-only" "proj/s/g3~1" "proj/s/g3" "--" "." ":(exclude).claude-trace")))
+            "the edit back in the worktree changes the one file")))))
+
+(deftest g6-garbage-on-stdin-is-no-event
+  (fresh!)
+  (let [repo (str (fs/path @dir "traces"))]
+    (p/shell {:in "this is not json" :out :string :err :string :extra-env {"TRACE_REPO" repo}}
+             "bb" "--config" (str (fs/path code "bb.edn")) "-m" "trace.hook" "tool")
+    (binding [g/*repo* repo]
+      (is (empty? (files/entries (files/spool-dir repo))))
+      (is (= "trace ok" (health/line)))
+      (is (str/includes? (slurp (str (fs/path repo ".git" "trace-errors.log"))) "no session_id")))))
+
+(deftest s1-an-unreadable-entry-goes-aside
+  (fresh!)
+  (let [proj (repo! (fs/path @dir "proj")) repo (str (fs/path @dir "traces"))]
+    (binding [g/*repo* repo]
+      (hook/ensure-repo! repo)
+      (spit (hook/spool! repo {:event "prompt" :raw "{}" :obs {}}) "{:event \"prompt\" :raw ")
+      (hook/spool! repo {:event "prompt" :raw (json/generate-string {"session_id" "u1" "cwd" proj "prompt" "after it"})
+                         :obs (hook/observe! repo "prompt" {"session_id" "u1" "cwd" proj "prompt" "after it"})})
+      (is (= 1 (worker/drain! repo)))
+      (is (= 1 (count (files/entries (files/failed-dir repo)))))
+      (is (= "prompt 00: after it" (first (subjects "proj/s/u1")))))))

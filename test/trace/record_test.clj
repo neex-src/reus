@@ -217,8 +217,12 @@
           (ev "tool" {"session_id" "s1" "cwd" proj "tool_name" "WebFetch" "tool_input" {"url" "http://x"} "tool_response" "ok"})
           (is (= (no-trace tool-c) (no-trace "proj/s/s1")))
           (is (= wt-head (trailer "proj/s/s1" "Real-Head")))
-          (testing "while a shell call in the main checkout switches to its tree"
-            (ev "tool" {"session_id" "s1" "cwd" proj "tool_name" "Bash" "tool_input" {"command" "ls"} "tool_response" "ok"})
+          (testing "so does a read in the main checkout (looking moves nothing)"
+            (ev "tool" {"session_id" "s1" "cwd" proj "tool_name" "Bash" "tool_input" {"command" "git log"} "tool_response" "ok"})
+            (is (= (no-trace tool-c) (no-trace "proj/s/s1")))
+            (is (= wt-head (trailer "proj/s/s1" "Real-Head"))))
+          (testing "while a shell call that may write, in the main checkout, switches to its tree"
+            (ev "tool" {"session_id" "s1" "cwd" proj "tool_name" "Bash" "tool_input" {"command" "make"} "tool_response" "ok"})
             (is (not (str/includes? (no-trace "proj/s/s1") "feature.txt")))
             (is (= (real proj "rev-parse" "HEAD") (trailer "proj/s/s1" "Real-Head")))
             (ev "tool" {"session_id" "s1" "cwd" proj "tool_name" "Write" "tool_input" {"file_path" (str (fs/path wt "feature.txt"))}

@@ -59,6 +59,42 @@
           (or (some-> (or (re-find #"^\s*cd\s+(\S+)\s*(?:&&|;)" cmd) (re-find #"git\s+-C\s+(\S+)" cmd)) second abs fs/normalize str)
               cwd)))))
 
+(def read-tools #{"Read" "NotebookRead" "read_file" "Glob" "Grep" "LS" "WebFetch" "WebSearch"})
+
+(def ^:private read-commands
+  #{"ls" "cat" "head" "tail" "less" "more" "grep" "rg" "egrep" "fgrep" "find" "fd" "wc" "pwd" "echo"
+    "printf" "stat" "file" "tree" "du" "df" "which" "type" "env" "printenv" "date" "cd" "true" "sort"
+    "uniq" "cut" "diff" "jq" "readlink" "realpath" "basename" "dirname" "id" "whoami" "uname" "uptime"
+    "nproc" "column" "tr" "nl" "comm" "cmp" "md5sum" "sha1sum" "sha256sum" "xxd" "od" "hexdump"})
+
+(def ^:private read-git
+  #{"log" "show" "status" "diff" "rev-parse" "ls-files" "ls-tree" "cat-file" "blame" "grep" "describe"
+    "shortlog" "reflog" "rev-list" "for-each-ref" "show-ref" "merge-base" "count-objects" "help" "version"})
+
+(defn- read-segment? [seg]
+  (let [ws (remove #(re-matches #"[A-Za-z_][A-Za-z0-9_]*=.*" %) (str/split (str/trim seg) #"\s+"))
+        [w & more] ws]
+    (cond (str/blank? w) true
+          (= "git" (fs/file-name w))
+          (let [sub (loop [[a b & r :as xs] more]
+                      (cond (empty? xs) nil
+                            (#{"-C" "-c" "--git-dir" "--work-tree"} a) (recur r)
+                            (str/starts-with? (str a) "-") (recur (rest xs))
+                            :else a))]
+            (boolean (read-git sub)))
+          :else (contains? read-commands (str (fs/file-name w))))))
+
+(defn read-only?
+  "Does this call certainly change nothing on disk? The reading tools, and a shell command whose every
+  part is a known reader, with no redirect into a file. Anything else counts as a write."
+  [{:strs [tool_name tool_input]}]
+  (let [cmd (get tool_input "command")]
+    (cond (read-tools (str/replace (str tool_name) #"^mcp__.*__" "")) true
+          (string? cmd) (let [c (str/replace cmd #"[0-9]?>&[0-9]" "")] ; 2>&1 writes no file
+                          (and (not (re-find #">(?!\s*/dev/null)" c))
+                               (every? read-segment? (str/split c #"\|\||&&|[;|&\n]"))))
+          :else false)))
+
 (defn worktree-of
   "The project a directory is in, walking up from a dir that is not there (yet, or any more)."
   [d dir]
@@ -136,9 +172,15 @@
                      (disk/project-of d dir)
                      (let [up (worktree-of d dir) was (some->> last-root (disk/project-of d))]
                        (when (and up was (= (:common up) (:common was))) up))))
-               p (named p)]
-           (merge (hashed d p)
-                  {:file (the-file d (or (:root p) cwd) input) :output (persisted-output d input)}))
+               p (named p)
+               read? (read-only? input)
+               ;; a read keeps the worktree the session (agent) last wrote in, or its cwd's: looking at main
+               ;; from a worktree, or at another repo, moves nothing (only a write does)
+               home (when (and p read?)
+                      (named (or (some->> last-root (disk/project-of d)) (disk/project-of d cwd))))]
+           (merge (hashed d (or home p))
+                  {:read? read?
+                   :file (the-file d (or (:root p) cwd) input) :output (persisted-output d input)}))
 
          "prompt"
          (let [cwdp (named (disk/project-of d cwd))

@@ -143,7 +143,7 @@
     (let [{:keys [project branch root troot thead common git-dir nn]} st
           agent (when (str/starts-with? (str key) "agent-") (subs key 6))]
       (cond-> (merge (select-keys st [:session :nn :k :open? :ttree :subject :reports :prompt-id :cwd])
-                     {:v 2 :agent agent :current project
+                     {:v 2 :agent agent :parent (when agent (:session st)) :current project
                       :n (or (store/kv (:s x) :counters branch) (some-> nn (str/split #"-") first parse-long) -1)
                       :branches (if project
                                   {project {:project project :branch branch :root (or troot root) :common common
@@ -158,7 +158,11 @@
    :branches {project {:project :branch :root :common :git-dir :thead :nn (its latest prompt)}}
    :current project (where it last committed)}"
   [x key] (upgrade x key (store/kv (:s x) :sessions key)))
-(defn- actor! [x key a] (store/kv! (:s x) :sessions key a))
+(defn- actor!
+  "Keep a's state; the actor whose event this is also keeps the spool entry it came from (:last-entry),
+  in the same write, so a worker cut off after it does not record that event again."
+  [x key a]
+  (store/kv! (:s x) :sessions key (cond-> a (and (:entry x) (= key (:tkey x))) (assoc :last-entry (:entry x)))))
 
 (defn- pending!
   "A finished agent whose parent was idle: its tip waits for the prompt that reacts to its notification."
@@ -201,21 +205,33 @@
                       (store/commit! (:s x) {:parents (vec (concat (when parent [parent]) extra)) :tree {:base tree :from (:common p)}
                                              :subject subject :body body :author author :committer committer})))))
 
+(def mirror-retry-ms "A mirror that failed is tried again for the same real tip after this long." (* 10 60 1000))
+
 (defn- mirror!
   "Bring trace main up to the real main: one commit per real first-parent commit since the last one
   mirrored (the first time, or when that one is gone from the repo, just the tip); the last mirrored
   is remembered after every commit, so a cut-off catch-up resumes instead of repeating. Never throws."
   [x {:keys [project common] :as p}]
   (when common
-    (try
-      (let [tip* (disk/main-tip (:d x) p)
-            last* (store/kv (:s x) :mirror project)]
-        (when (and tip* (not= tip* last*))
-          (doseq [sha (disk/chain (:d x) p last* tip*)]
-            (mirror-commit! x p (head-ref (main-branch project)) sha)
-            (store/kv! (:s x) :mirror project sha))
-          (store/kv! (:s x) :mirror project tip*)))
-      (catch Exception e (warn! x (str "mirror " project) e)))))
+    (let [tip* (disk/main-tip (:d x) p)
+          known (store/kv (:s x) :mirror project)]
+      (when (and tip* (not= tip* known)
+                 (not (let [{:keys [tip at]} (store/kv (:s x) :mirror-failed project)] ; a failing mirror waits a while
+                        (and (= tip tip*) (< (- (System/currentTimeMillis) (or at 0)) mirror-retry-ms)))))
+        (try
+          (let [ref (head-ref (main-branch project))
+                ;; the trace main tip says what it mirrors: a commit made right before a cut-off is not made again
+                last* (or (some-> (store/tip (:s x) ref) (as-> t (store/trailer (:s x) t "Real-Commit"))) known)]
+            (when (not= tip* last*)
+              (doseq [sha (disk/chain (:d x) p last* tip*)]
+                (mirror-commit! x p ref sha)
+                (store/kv! (:s x) :mirror project sha)))
+            (store/kv! (:s x) :mirror project tip*)
+            (store/kv! (:s x) :mirror-failed project nil))
+          (catch Exception e
+            ;; not again for this tip for a while: the next real commit tries at once
+            (store/kv! (:s x) :mirror-failed project {:tip tip* :at (System/currentTimeMillis)})
+            (warn! x (str "mirror " project) e)))))))
 
 (defn- ensure-main!
   "A project without a real main (or outside git) gets an empty root on trace main."
@@ -550,16 +566,19 @@
 (defn handle-in!
   "Record one hook event in context x ({:s store :d disk, :live? read the transcript}): input the
   parsed payload, raw its stdin as received (default: input re-encoded), obs its observation
-  (trace.observe; made now when not given)."
-  [x event input & [{:keys [raw obs]}]]
+  (trace.observe; made now when not given), entry the spool entry it comes from (an entry its
+  actor's state names as recorded, or a later one, is skipped)."
+  [x event input & [{:keys [raw obs entry]}]]
   (store/ensure! (:s x))
   (let [obs (or obs (observe-now x event input))
-        x (assoc x :raw (or raw (json/generate-string input)) :obs obs :tkey (tkey-of input))
+        x (assoc x :raw (or raw (json/generate-string input)) :obs obs :tkey (tkey-of input) :entry entry)
         x (assoc x :turn (or (:turn x) (when (:live? x) (live-turn event input obs)) (payload-turn input)))
         late (when (and (:live? x) (#{"tool" "stop"} event)) (late-turn x (:tkey x) input))]
     (store/locked
      (:s x)
-     #(do (when late
+     #(when-not (when-let [e (:entry x)] ; recorded already, by a worker cut off before it could say so
+                  (when-let [l (:last-entry (store/kv (:s x) :sessions (:tkey x)))] (not (neg? (compare l e)))))
+        (when late
             (store/note! (:s x) turn-ref (:commit late) (pr-str (:turn late)))
             (store/kv! (:s x) :turn-pending (:tkey x) nil))
           (case event
