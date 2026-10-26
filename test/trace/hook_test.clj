@@ -400,3 +400,25 @@
       (is (= 1 (worker/drain! repo)))
       (is (= 1 (count (files/entries (files/failed-dir repo)))))
       (is (= "prompt 00: after it" (first (subjects "proj/s/u1")))))))
+
+(deftest own-objects-makes-an-older-repo-self-contained
+  (fresh!)
+  (let [proj (repo! (fs/path @dir "proj")) repo (str (fs/path @dir "traces"))
+        alt (fs/path repo ".git" "objects" "info" "alternates")]
+    (binding [g/*repo* repo]
+      (ev "prompt" {"session_id" "o2" "cwd" proj "prompt" "go"})
+      ;; what older code made: a commit whose blob only the project has, reachable through alternates
+      (spit (str (fs/path proj "borrowed.txt")) "only in the project\n")
+      (real proj "add" ".") (real proj "commit" "-qm" "borrowed")
+      (spit (str alt) (str proj "/.git/objects\n"))
+      (let [t (real proj "rev-parse" "HEAD^{tree}")
+            c (git "commit-tree" t "-p" "proj/main" "-m" "older code")]
+        (git "update-ref" "refs/heads/proj/main" c))
+      (hook/spool! repo {:event "stop" :raw (json/generate-string {"session_id" "o2" "cwd" proj "last_assistant_message" "ok"}) :obs {}})
+      (worker/own-objects! repo)
+      (is (not (fs/exists? alt)))
+      (is (fs/exists? (str alt ".bak")))
+      (fs/delete-tree proj)
+      (is (zero? (:exit (g/git* {} "fsck" "--connectivity-only" "--no-dangling"))) "complete with the project gone")
+      (is (empty? (files/entries (files/spool-dir repo))) "the waiting event was recorded after")
+      (is (= "response 00" (first (subjects "proj/s/o2")))))))

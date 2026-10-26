@@ -34,6 +34,10 @@
                :requires ([trace.worker trace.git])
                :task (println (trace.worker/drain! trace.git/*repo*) "events recorded")}
 
+  trace:own-objects {:doc "One-off for a trace repo of older code: repack, drop its alternates and seeded indexes (checked)"
+                     :requires ([trace.worker trace.git])
+                     :task (trace.worker/own-objects! trace.git/*repo*)}
+
   trace:retry {:doc "Spool the events the worker could not record again, and record them"
                :requires ([trace.worker trace.git])
                :task (let [r trace.git/*repo*] (println (trace.worker/retry! r) "spooled again;" (trace.worker/drain! r) "recorded"))}
