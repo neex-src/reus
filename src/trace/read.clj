@@ -202,6 +202,7 @@
         rel (relativizer (keep #(get head %) ["root"]))
         steps (mapv (partial step rel) recs)
         tn (turn-notes (map :sha steps))
+        held (g/have (concat (keep :blob steps) (for [s steps f (:files s)] (str (:sha s) ":" (:path f)))))
         outs (note-blobs "output" (map :sha steps))
         texts (cat-batch (concat (keep #(when (#{:prompt :response} (:kind %)) (str (:sha %) ":" trace-dir (if (= :prompt (:kind %)) "prompt.md" "reply.md"))) steps)
                                  (vals outs)))
@@ -211,8 +212,11 @@
                           (get tn (:sha s)) (assoc :turn (get tn (:sha s)))
                           o (assoc :result o)
                           t (assoc :lines (count (str/split-lines t)))
+                          (and t (str/blank? t)) (assoc :result nil :lines nil :silent true)
                           (and t (= "Agent" (:tool (:call s)))) (assoc :agent-id (agents/agent-id t))
-                          (and o (nil? t)) (assoc :result nil :same true))))
+                          (and o (nil? t)) (assoc :result nil :same true)
+                          (and (:blob s) (not (held (:blob s)))) (assoc :blob nil :unheld true)
+                          (seq (:files s)) (update :files (fn [fs] (mapv #(cond-> % (not (held (str (:sha s) ":" (:path %)))) (assoc :gone true)) fs))))))
                     steps)
         prompt (first (filter #(= :prompt (:kind %)) steps))
         response (first (filter #(= :response (:kind %)) steps))
@@ -224,7 +228,8 @@
      :turn (:turn prompt) :turn-end (:turn response)
      :trailers (:trailers prompt)
      :t0 (:at prompt) :t1 (or (:at response) (:at (peek work)) (:at prompt))
-     :fork (some-> prompt :sha (str "^"))
+     :fork (:sha prompt)
+     :end (:sha (last recs))
      :steps work}))
 
 (defn prompt-data
@@ -241,15 +246,26 @@
   []
   (fs/exists? (fs/path g/*repo* ".git" "trace-sessions")))
 
+(def live-window-ms
+  "A prompt open in its state but with no event for this long is not running: its session died
+  without a Stop (a killed claude, a closed terminal), which leaves the state open for ever."
+  (* 2 3600 1000))
+
 (defn live-branches
-  "Ids (see prompt-nos) of the prompts that are still being worked on: open in a session (trace.record)."
+  "Ids (see prompt-nos) of the prompts that are still being worked on: open in a session or agent
+  state of trace.record (.git/trace-sessions; v2 keeps a branch per project, v1 one :branch) that
+  saw an event within live-window-ms."
   []
-  (set (let [d (fs/path g/*repo* ".git" "trace-sessions")]
-         (when (fs/exists? d)
-           (keep #(try (let [st (edn/read-string (slurp (str %)))]
-                         (when (:open? st) (prompt-id (:branch st) (:nn st))))
-                       (catch Exception _ nil))
-                 (fs/list-dir d))))))
+  (let [d (fs/path g/*repo* ".git" "trace-sessions")
+        since (- (System/currentTimeMillis) live-window-ms)]
+    (set (when (fs/exists? d)
+           (mapcat #(try (let [st (edn/read-string (slurp (str %)))]
+                           (when (and (:open? st) (> (.toMillis (fs/last-modified-time %)) since))
+                             (if (:branches st)
+                               (for [b (vals (:branches st)) :when (:branch b)] (prompt-id (:branch b) (or (:nn b) (:nn st))))
+                               (when (:branch st) [(prompt-id (:branch st) (:nn st))]))))
+                         (catch Exception _ nil))
+                    (fs/list-dir d))))))
 
 (defn all-prompts [tips main]
   (keep #(prompt-data tips main %) (prompt-nos tips main)))
