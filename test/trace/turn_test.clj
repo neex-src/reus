@@ -85,7 +85,7 @@
   (p/shell {:dir (str dir) :out :string :err :string} "git" "init" "-q" "-b" "main")
   (str dir))
 (defn- note [ref c] (let [r (g/git* {} "notes" (str "--ref=" ref) "show" c)] (when (zero? (:exit r)) (str/trim (:out r)))))
-(defn- ev [event m] (binding [rec/*probe?* true] (rec/handle! event m (json/generate-string m))))
+(defn- ev [event m] (rec/handle! event m (json/generate-string m)))
 
 (deftest live
   (fs/delete-tree scratch)

@@ -14,7 +14,8 @@
             [clojure.set :as set]
             [clojure.string :as str]
             [trace.git :as g :refer [git]]
-            [trace.install :as install]))
+            [trace.install :as install]
+            [trace.worker :as worker]))
 
 (def prompt
   (str "Do exactly these steps in this git repo, nothing else, no questions. Commit with "
@@ -115,6 +116,7 @@
     (println "e2e in" dir)
     (let [r (run-claude! dir proj repo bb-edn)]
       (println "claude exit" (:exit r) "(output in claude.out)")
+      (when (fs/exists? repo) (worker/drain! repo)) ; what the hooks spooled is recorded before it is checked
       (binding [g/*repo* repo]
         (if-not (fs/exists? repo)
           (do (println "FAIL nothing was recorded") (System/exit 99))

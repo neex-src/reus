@@ -6,6 +6,7 @@
             [clojure.string :as str]
             [clojure.test :refer [deftest is testing]]
             [trace.git :as g :refer [git]]
+            [trace.health :as health]
             [trace.read :as r]
             [trace.record :as rec]))
 
@@ -216,8 +217,12 @@
           (ev "tool" {"session_id" "s1" "cwd" proj "tool_name" "WebFetch" "tool_input" {"url" "http://x"} "tool_response" "ok"})
           (is (= (no-trace tool-c) (no-trace "proj/s/s1")))
           (is (= wt-head (trailer "proj/s/s1" "Real-Head")))
-          (testing "while a shell call in the main checkout switches to its tree"
-            (ev "tool" {"session_id" "s1" "cwd" proj "tool_name" "Bash" "tool_input" {"command" "ls"} "tool_response" "ok"})
+          (testing "so does a read in the main checkout (looking moves nothing)"
+            (ev "tool" {"session_id" "s1" "cwd" proj "tool_name" "Bash" "tool_input" {"command" "git log"} "tool_response" "ok"})
+            (is (= (no-trace tool-c) (no-trace "proj/s/s1")))
+            (is (= wt-head (trailer "proj/s/s1" "Real-Head"))))
+          (testing "while a shell call that may write, in the main checkout, switches to its tree"
+            (ev "tool" {"session_id" "s1" "cwd" proj "tool_name" "Bash" "tool_input" {"command" "make"} "tool_response" "ok"})
             (is (not (str/includes? (no-trace "proj/s/s1") "feature.txt")))
             (is (= (real proj "rev-parse" "HEAD") (trailer "proj/s/s1" "Real-Head")))
             (ev "tool" {"session_id" "s1" "cwd" proj "tool_name" "Write" "tool_input" {"file_path" (str (fs/path wt "feature.txt"))}
@@ -277,14 +282,14 @@
   (fresh!)
   (binding [g/*repo* (str (fs/path scratch "traces"))]
     (fs/create-dirs (fs/path g/*repo* ".git"))
-    (is (= "trace ok" (rec/health-line)))
-    (rec/health-fail! "tool" {"session_id" "s1"} (ex-info "boom" {}))
-    (let [since (second (re-find #"since (\S+):" (rec/health-line)))]
-      (is (str/ends-with? (rec/health-line) ": boom"))
-      (rec/health-fail! "stop" {"session_id" "s1"} (ex-info "bang" {}))
-      (is (= (str "trace failing since " since ": bang") (rec/health-line))))
-    (rec/health-ok!)
-    (is (= "trace ok" (rec/health-line)))))
+    (is (= "trace ok" (health/line)))
+    (health/fail! :worker "tool" {"session_id" "s1"} (ex-info "boom" {}))
+    (let [since (second (re-find #"since (\S+):" (health/line)))]
+      (is (str/ends-with? (health/line) ": boom"))
+      (health/fail! :worker "stop" {"session_id" "s1"} (ex-info "bang" {}))
+      (is (= (str "trace worker failing since " since ": bang") (health/line))))
+    (health/ok! :worker)
+    (is (= "trace ok" (health/line)))))
 
 (deftest model-and-usage-from-the-payload
   (let [proj (fresh!)]

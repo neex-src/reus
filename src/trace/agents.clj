@@ -30,8 +30,14 @@
 (defn- ms-between [a b]
   (try (.toMillis (Duration/between (Instant/parse a) (Instant/parse b))) (catch Exception _ nil)))
 
-(defn find-file [session id suffix]
-  (first (fs/glob projects-dir (str "*/" session "/subagents/agent-" id suffix))))
+(defn find-file
+  "The file of agent id of a session: beside the session's transcript when its path is known (no
+  search), else found among all projects' transcripts."
+  [session id suffix & [transcript]]
+  (or (when transcript
+        (let [f (fs/path (fs/parent transcript) (str session) "subagents" (str "agent-" id suffix))]
+          (when (fs/exists? f) f)))
+      (first (fs/glob projects-dir (str "*/" session "/subagents/agent-" id suffix)))))
 
 (defn- scan
   "{:first :last :calls :model} of a transcript, from its raw lines."
