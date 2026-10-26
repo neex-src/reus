@@ -262,3 +262,5 @@ body:not(.split-on) .split { display: none; }
 /* a subagent's own history, nested under its Agent step */
 .agent-run { margin-top: 6px; padding-left: 10px; border-left: 2px dashed var(--line); }
 .steps.nested { margin-top: 4px; }
+.pr .when .sess { font-family: 'JetBrains Mono', monospace; font-size: 10.5px; }
+.agent-run .brief { font-size: 13px; color: var(--muted); max-height: 9em; overflow: hidden; margin: 4px 0 8px; }
