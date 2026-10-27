@@ -97,6 +97,7 @@
 (defn -main [& [event]]
   (let [raw (slurp *in*)
         input (try (json/parse-string raw) (catch Exception _ {}))]
+    (try (health/seen! (get input "session_id")) (catch Throwable _))
     (try
       (record! g/*repo* event input raw)
       (catch Throwable e

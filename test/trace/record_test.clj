@@ -4,13 +4,16 @@
             [cheshire.core]
             [babashka.process :as p]
             [clojure.string :as str]
-            [clojure.test :refer [deftest is testing]]
+            [clojure.test :refer [deftest is testing use-fixtures]]
             [trace.git :as g :refer [git]]
             [trace.health :as health]
             [trace.read :as r]
             [trace.record :as rec]))
 
 (def scratch (str (fs/path (fs/parent (System/getProperty "babashka.config")) ".scratch" "trace-test")))
+
+;; trace:health looks at this machine's transcripts too: not in these tests
+(use-fixtures :each (fn [t] (binding [health/*claude-dir* (str (fs/path scratch "no-claude"))] (t))))
 
 (defn- sh [dir & args] (apply p/shell {:dir (str dir) :out :string :err :string} args))
 (defn- real [proj & args] (str/trim (:out (apply sh proj "git" "-c" "user.name=t" "-c" "user.email=t@t" args))))

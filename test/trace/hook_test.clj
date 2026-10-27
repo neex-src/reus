@@ -6,19 +6,24 @@
             [babashka.process :as p]
             [cheshire.core :as json]
             [clojure.string :as str]
-            [clojure.test :refer [deftest is testing]]
+            [clojure.test :refer [deftest is testing use-fixtures]]
             [trace.agents :as agents]
             [trace.disk :as disk]
             [trace.files :as files]
             [trace.git :as g :refer [git]]
             [trace.health :as health]
             [trace.hook :as hook]
+            [trace.install :as install]
             [trace.record :as rec]
             [trace.store :as store]
             [trace.worker :as worker]))
 
 (def code (str (fs/parent (System/getProperty "babashka.config"))))
 (def scratch (str (fs/path code ".scratch" "hook-test")))
+(def seen (str (fs/path scratch "seen")))
+
+;; the hook's marks and trace:health's look at this machine's transcripts: not the real ones
+(use-fixtures :each (fn [t] (binding [health/*claude-dir* (str (fs/path seen "no-claude")) health/*seen-dir* seen] (t))))
 
 (defn- sh [dir & args] (apply p/shell {:dir (str dir) :out :string :err :string} args))
 (defn- real [dir & args] (str/trim (:out (apply sh dir "git" "-c" "user.name=t" "-c" "user.email=t@t" args))))
@@ -53,8 +58,8 @@
   "The hook as Claude Code runs it; ms it took."
   [repo event m & [env]]
   (let [t0 (System/nanoTime)]
-    (p/shell {:in (json/generate-string m) :out :string :err :string
-              :extra-env (merge {"TRACE_REPO" repo} env)}
+    (p/shell {:in (some-> m json/generate-string) :out :string :err :string
+              :extra-env (merge {"TRACE_REPO" repo "TRACE_SEEN" seen} env)}
              "bb" "--config" (str (fs/path code "bb.edn")) "-m" "trace.hook" event)
     (/ (- (System/nanoTime) t0) 1e6)))
 
@@ -382,7 +387,7 @@
 (deftest g6-garbage-on-stdin-is-no-event
   (fresh!)
   (let [repo (str (fs/path @dir "traces"))]
-    (p/shell {:in "this is not json" :out :string :err :string :extra-env {"TRACE_REPO" repo}}
+    (p/shell {:in "this is not json" :out :string :err :string :extra-env {"TRACE_REPO" repo "TRACE_SEEN" seen}}
              "bb" "--config" (str (fs/path code "bb.edn")) "-m" "trace.hook" "tool")
     (binding [g/*repo* repo]
       (is (empty? (files/entries (files/spool-dir repo))))
@@ -422,3 +427,46 @@
       (is (zero? (:exit (g/git* {} "fsck" "--connectivity-only" "--no-dangling"))) "complete with the project gone")
       (is (empty? (files/entries (files/spool-dir repo))) "the waiting event was recorded after")
       (is (= "response 00" (first (subjects "proj/s/o2")))))))
+
+(deftest p1-the-hook-line-needs-no-path
+  (fresh!)
+  (let [proj (repo! (fs/path @dir "proj")) repo (str (fs/path @dir "traces"))
+        sid (str "p1-" (System/nanoTime))
+        line (get-in (install/hook-entries (str (fs/path code "bb.edn"))) ["UserPromptSubmit" 0 "hooks" 0 "command"])
+        run (fn [cmd m] (p/shell {:in (some-> m json/generate-string) :out :string :err :string :continue true
+                                  :env {"PATH" "" "TRACE_REPO" repo "TRACE_SEEN" seen}}
+                                 "/bin/sh" "-c" cmd))]
+    (is (= 127 (:exit (run "bb --version" nil))) "the session's PATH has no bb (nor git)")
+    (is (zero? (:exit (run line {"session_id" sid "cwd" proj "prompt" "go" "hook_event_name" "UserPromptSubmit"}))))
+    (is (drained? repo 15000) "the worker it woke, git included, ran without the session's PATH")
+    (binding [g/*repo* repo]
+      (is (= "prompt 00: go" (first (subjects (str "proj/s/" (subs sid 0 8))))))
+      (is (= "trace ok" (health/line))))
+    (is (health/seen? sid) "the hook marked the session")))
+
+(deftest p2-a-session-the-hook-never-ran-for-is-seen
+  (fresh!)
+  (let [claude (str (fs/path @dir "claude")) marks (str (fs/path @dir "seen"))
+        t (fn [f ago-ms] (fs/create-dirs (fs/parent f)) (spit (str f) "{}\n")
+            (fs/set-last-modified-time f (fs/millis->file-time (- (System/currentTimeMillis) ago-ms))) f)
+        m 60000]
+    (fs/create-dirs claude)
+    (spit (str (fs/path claude "settings.json")) (json/generate-string {"hooks" (install/hook-entries "/r/bb.edn")}))
+    (binding [health/*claude-dir* claude health/*seen-dir* marks g/*repo* (str (fs/path @dir "traces"))]
+      (t (fs/path claude "projects" "-p" "old.jsonl") (* 3 3600000))
+      (is (empty? (health/unrecorded)) "nothing before the hook marked a first session")
+      (health/seen! "first")
+      (t (fs/path marks ".since") (* 2 3600000))
+      (t (fs/path claude "projects" "-p" "first.jsonl") (* 10 m))
+      (t (fs/path claude "projects" "-p" "lost.jsonl") (* 5 m))
+      (t (fs/path claude "projects" "-q" "busy.jsonl") 1000)
+      (t (fs/path claude "projects" "-p" "first" "subagents" "agent-x.jsonl") (* 5 m))
+      (is (= ["lost"] (map :session (health/unrecorded)))
+          "not one the hook ran for, nor one written in the last minute, nor one older than the marks")
+      (is (str/includes? (health/line) "trace sessions not recorded"))
+      (is (str/includes? (health/short) "lost"))
+      (is (= ["lost"] (map :session (health/ack!))))
+      (is (= "trace ok" (health/line)) "acked")
+      (t (fs/path claude "projects" "-p" "lost2.jsonl") (* 5 m))
+      (spit (str (fs/path claude "settings.json")) "{}")
+      (is (empty? (health/unrecorded)) "the hook is off (trace:off): nothing is missed"))))
