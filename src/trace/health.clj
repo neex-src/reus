@@ -7,6 +7,9 @@
                                           the next event that succeeds in that part
   .git/trace-spool/                       events not recorded yet (behind: the oldest is over a minute old)
   .git/trace-failed/                      events the worker could not record (bb trace:retry spools them again)
+  <reus>/var/hook-seen/<session id>       a session the hook ran for (once per session): a hook that never
+                                          runs fails nowhere (Claude Code drops a hook whose command is not
+                                          found, without a word), so a transcript with no mark is the sign
 
   (line)   what bb trace:health prints: \"trace ok\", else one line per problem
   (short)  for a status bar: empty while ok"
@@ -16,6 +19,62 @@
             [clojure.string :as str]
             [trace.files :as files]
             [trace.git :as g]))
+
+(def ^:dynamic *seen-dir*
+  "Where the hook marks the sessions it ran for: $TRACE_SEEN, else var/hook-seen of the main checkout
+  (one per machine, whatever trace repo or worktree of reus the hook ran from)."
+  (or (System/getenv "TRACE_SEEN") (str (fs/path (g/main-checkout) "var" "hook-seen"))))
+
+(defn seen!
+  "The hook ran for this session. The first mark ever also writes .since: transcripts older than the
+  marks are not looked at."
+  [session]
+  (when-not (str/blank? (str session))
+    (let [f (fs/path *seen-dir* (files/clean-key session))]
+      (when-not (fs/exists? f)
+        (fs/create-dirs *seen-dir*)
+        (let [since (fs/path *seen-dir* ".since")] (when-not (fs/exists? since) (spit (str since) "")))
+        (spit (str f) "")))))
+
+(def unseen-ms "How far back transcripts are looked at for sessions the hook never ran for." (* 24 3600 1000))
+(def idle-ms "A transcript written to in the last minute may be of a session whose first event is under way." 60000)
+
+(def ^:dynamic *claude-dir* (or (System/getenv "CLAUDE_CONFIG_DIR") (str (fs/path (fs/home) ".claude"))))
+
+(defn seen?
+  "Did the hook run for this session? For a harness that starts sessions with --no-session-persistence
+  (no transcript: unrecorded cannot see them) and wants to know they were recorded."
+  [session]
+  (fs/exists? (fs/path *seen-dir* (files/clean-key session))))
+
+(defn- installed? []
+  (try (str/includes? (slurp (str (fs/path *claude-dir* "settings.json"))) "trace.hook") (catch Throwable _ false)))
+
+(defn unrecorded
+  "[{:session :file :ms}] of the transcripts (~/.claude/projects/*/*.jsonl) written in the last unseen-ms,
+  idle for idle-ms, of sessions the hook never ran for, newest first; none while the hook is not installed
+  (bb trace:off) or before it marked anything. A session started with --no-session-persistence leaves
+  no transcript and is not seen here."
+  []
+  (let [since (fs/file (fs/path *seen-dir* ".since"))]
+    (when (and (.exists since) (installed?))
+      (let [now (System/currentTimeMillis)
+            from (max (.lastModified since) (- now unseen-ms))]
+        (->> (.listFiles (fs/file *claude-dir* "projects"))
+             (mapcat #(.listFiles ^java.io.File %))
+             (keep (fn [^java.io.File f]
+                     (let [n (.getName f) ms (.lastModified f)]
+                       (when (and (str/ends-with? n ".jsonl") (> ms from) (< ms (- now idle-ms)))
+                         (let [session (subs n 0 (- (count n) 6))]
+                           (when-not (.exists (fs/file *seen-dir* (files/clean-key session)))
+                             {:session session :file (str f) :ms ms}))))))
+             (sort-by :ms >))))))
+
+(defn ack!
+  "Mark the sessions unrecorded lists as seen (run without the hook on purpose: --safe-mode, other
+  settings); what it marked."
+  []
+  (doall (for [{:keys [session] :as u} (unrecorded)] (do (seen! session) u))))
 
 (def behind-ms "A spooled event this old means the worker is not keeping up (or not running)." 60000)
 
@@ -70,13 +129,18 @@
 (defn problems
   "[[label since reason]] of what is wrong now."
   []
-  (let [{:keys [hook worker waiting oldest-ms failed]} (state)]
+  (let [{:keys [hook worker waiting oldest-ms failed]} (state)
+        unrecorded (try (unrecorded) (catch Throwable _ nil))]
     (cond-> []
       hook (conj ["hook failing" (:failing-since hook) (:reason hook)])
       worker (conj ["worker failing" (:failing-since worker) (:reason worker)])
       (and oldest-ms (> (- (System/currentTimeMillis) oldest-ms) behind-ms))
       (conj ["behind" oldest-ms (str waiting " events not recorded yet")])
-      (pos? failed) (conj ["events failed" nil (str failed " in .git/trace-failed (bb trace:retry)")]))))
+      (pos? failed) (conj ["events failed" nil (str failed " in .git/trace-failed (bb trace:retry)")])
+      (seq unrecorded)
+      (conj ["sessions not recorded" (:ms (last unrecorded))
+             (str (count unrecorded) " in 24 h, the hook never ran: " (str/join ", " (map #(subs (:session %) 0 (min 8 (count (:session %)))) unrecorded))
+                  " (" (:file (first unrecorded)) "; bb trace:health --ack when on purpose)")]))))
 
 (defn line []
   (if-let [ps (seq (problems))]

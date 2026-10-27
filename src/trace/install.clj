@@ -5,6 +5,7 @@
   trace.record, the older entry point), and `on` again replaces them."
   (:require [babashka.fs :as fs]
             [cheshire.core :as json]
+            [clojure.string :as str]
             [trace.git :as g]
             [trace.disk :as disk]
             [trace.record :as rec]))
@@ -15,10 +16,16 @@
 
 (defn- hook [cmd] [{"hooks" [{"type" "command" "command" cmd "timeout" 15}]}])
 
+(defn- sh-quote [s] (str "'" (str/replace (str s) "'" "'\\''") "'"))
+
 (defn hook-entries
-  "The hooks settings for the bb.edn that has trace.hook."
+  "The hooks settings for the bb.edn that has trace.hook. Nothing in them depends on the session's PATH
+  (Claude Code drops a hook whose command is not found, without a word): bb by its absolute path, under
+  the PATH of the process that made them (so the git, setsid and bb the hook and its worker run are found
+  also in a session whose PATH holds none of them)."
   [bb-edn]
-  (let [cmd #(str "bb --config " bb-edn " -m trace.hook " %)]
+  (let [cmd #(str "/usr/bin/env PATH=" (sh-quote (or (System/getenv "PATH") "")) " " (sh-quote g/bb)
+                  " --config " (sh-quote bb-edn) " -m trace.hook " %)]
     {"UserPromptSubmit" (hook (cmd "prompt"))
      "PostToolUse" (hook (cmd "tool"))
      "PostToolUseFailure" (hook (cmd "tool"))

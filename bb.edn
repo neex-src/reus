@@ -22,9 +22,11 @@
                 :requires ([trace.replay])
                 :task (apply trace.replay/-main *command-line-args*)}
 
-  trace:health {:doc "Is the trace working? bb trace:health  (failing hook or worker, events not recorded yet, failed ones)"
+  trace:health {:doc "Is the trace working? bb trace:health [--ack]  (failing hook or worker, events not recorded yet, failed ones, sessions the hook never ran for; --ack: those were on purpose)"
                 :requires ([trace.health])
-                :task (println (trace.health/line))}
+                :task (if (= "--ack" (first *command-line-args*))
+                        (doseq [{:keys [session file]} (trace.health/ack!)] (println "acked" session file))
+                        (println (trace.health/line)))}
 
   trace:status {:doc "trace:health for a status bar: prints nothing while the trace is ok"
                 :requires ([trace.health])

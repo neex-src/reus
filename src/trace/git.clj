@@ -14,6 +14,19 @@
         (or (some-> (System/getProperty "babashka.config") fs/parent)
             (some-> (io/resource "trace/git.clj") io/file fs/parent fs/parent fs/parent)))))
 
+(defn main-checkout
+  "The main checkout of the reus repo home is a worktree of (home itself when it is that one)."
+  []
+  (let [dot (fs/file home ".git")]
+    (or (when (.isFile dot)
+          (some->> (slurp dot) (re-find #"gitdir:\s*(\S+)/\.git/worktrees/") second))
+        home)))
+
+(def bb
+  "The bb running this, by its absolute path (a hook's PATH may not have bb)."
+  (or (some-> (.orElse (.command (.info (java.lang.ProcessHandle/current))) nil) (#(when (= "bb" (fs/file-name %)) %)))
+      (some-> (fs/which "bb") str) "bb"))
+
 (def default-repo (str (fs/path home "var" "traces")))
 
 (def ^:dynamic *repo*
