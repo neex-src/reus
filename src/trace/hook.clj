@@ -61,7 +61,7 @@
     (let [log (io/file (str (fs/path repo ".git" "trace-worker.log")))]
       (p/process {:in "" :out :append :out-file log :err :append :err-file log
                   :extra-env {"TRACE_REPO" (str repo)}}
-                 "setsid" "-f" "bb" "--config" (str (fs/path g/home "bb.edn")) "-m" "trace.worker"))))
+                 "setsid" "-f" g/bb "--config" (str (fs/path g/home "bb.edn")) "-m" "trace.worker"))))
 
 (defn ensure-repo!
   "The trace repo, made when it is not there."
