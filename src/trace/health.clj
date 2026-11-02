@@ -50,10 +50,24 @@
 (defn- installed? []
   (try (str/includes? (slurp (str (fs/path *claude-dir* "settings.json"))) "trace.hook") (catch Throwable _ false)))
 
+(defn- last-entry-ms
+  "When a transcript's last entry was written (its timestamp), nil when its tail has none. An old transcript can get
+  a new mtime with nothing added to it."
+  [^java.io.File f]
+  (with-open [raf (java.io.RandomAccessFile. f "r")]
+    (let [n (.length raf)
+          off (max 0 (- n 65536))
+          buf (byte-array (- n off))]
+      (.seek raf off)
+      (.readFully raf buf)
+      (some-> (last (re-seq #"\"timestamp\":\"([^\"]+)\"" (String. buf "UTF-8")))
+              second
+              (#(try (.toEpochMilli (java.time.Instant/parse %)) (catch Throwable _ nil)))))))
+
 (defn unrecorded
   "[{:session :file :ms}] of the transcripts (~/.claude/projects/*/*.jsonl) written in the last unseen-ms,
   idle for idle-ms, of sessions the hook never ran for, newest first; none while the hook is not installed
-  (bb trace:off) or before it marked anything. A session started with --no-session-persistence leaves
+  (bb trace:off) or before it marked anything. Written means an entry was added, not that the file was touched. A session started with --no-session-persistence leaves
   no transcript and is not seen here."
   []
   (let [since (fs/file (fs/path *seen-dir* ".since"))]
@@ -66,7 +80,8 @@
                      (let [n (.getName f) ms (.lastModified f)]
                        (when (and (str/ends-with? n ".jsonl") (> ms from) (< ms (- now idle-ms)))
                          (let [session (subs n 0 (- (count n) 6))]
-                           (when-not (.exists (fs/file *seen-dir* (files/clean-key session)))
+                           (when (and (not (.exists (fs/file *seen-dir* (files/clean-key session))))
+                                      (let [e (last-entry-ms f)] (or (nil? e) (> e from))))
                              {:session session :file (str f) :ms ms}))))))
              (sort-by :ms >))))))
 
