@@ -461,8 +461,12 @@
       (t (fs/path claude "projects" "-p" "lost.jsonl") (* 5 m))
       (t (fs/path claude "projects" "-q" "busy.jsonl") 1000)
       (t (fs/path claude "projects" "-p" "first" "subagents" "agent-x.jsonl") (* 5 m))
+      (let [touched (fs/path claude "projects" "-p" "touched.jsonl")]
+        (t touched (* 5 m))
+        (spit (str touched) "{\"type\":\"system\",\"timestamp\":\"2020-01-01T00:00:00.000Z\"}\n")
+        (fs/set-last-modified-time touched (fs/millis->file-time (- (System/currentTimeMillis) (* 5 m)))))
       (is (= ["lost"] (map :session (health/unrecorded)))
-          "not one the hook ran for, nor one written in the last minute, nor one older than the marks")
+          "not one the hook ran for, nor one written in the last minute, nor one older than the marks, nor an old one only touched")
       (is (str/includes? (health/line) "trace sessions not recorded"))
       (is (str/includes? (health/short) "lost"))
       (is (= ["lost"] (map :session (health/ack!))))
