@@ -119,19 +119,20 @@
 
 (def ^:private fmt
   (str "%x1e%H%x1f%P%x1f%an <%ae> %ad%x1f%cn <%ce> %cd%x1f%s"
-       (str/join (map #(str "%x1f%(trailers:key=" % ",valueonly,separator=%x2C)") ["Prompt-Id" "Tool" "Agent" "Worktree"]))))
+       (str/join (map #(str "%x1f%(trailers:key=" % ",valueonly,separator=%x2C)") ["Prompt-Id" "Tool" "Agent" "Worktree" "Real-Commit"]))))
 
 (defn- new-commits
   "The trace commits reachable from heads and not from done, parents first:
-  [{:sha :parents :author :committer :subject :prompt-id :tool :agent :worktree}]."
+  [{:sha :parents :author :committer :subject :prompt-id :tool :agent :worktree :main?}]."
   [heads done]
   (let [done (g/have (vals done))]
     (for [rec (rest (str/split (apply git! "log" "--topo-order" "--reverse" "--date=raw" (str "--format=" fmt)
                                       (concat (distinct (vals heads)) (when (seq done) (cons "--not" done))))
                                #"\u001e"))
-          :let [[sha ps author committer subject pid tool agent wt] (map str/trim (str/split rec #"\u001f" -1))]]
+          :let [[sha ps author committer subject pid tool agent wt real] (map str/trim (str/split rec #"\u001f" -1))]]
       {:sha sha :parents (vec (remove str/blank? (str/split ps #" "))) :author author :committer committer
-       :subject subject :prompt-id pid :tool tool :agent agent :worktree wt})))
+       :subject subject :prompt-id pid :tool tool :agent agent :worktree wt
+       :main? (or (not (str/blank? real)) (str/blank? ps))})))
 
 (defn- diffs
   "{sha [[old-blob new-blob path]...]} of the Clojure files each commit changed against its first parent."
@@ -219,8 +220,8 @@
 (defn- catch-up!
   "The fn commits of project's new trace commits (commits, parents first) in store s, and its fn refs;
   {:made n :lines {ref lines}}. The lines of a trace commit, {:cur worktree :by {worktree {:fn id :files
-  {path blob}}}}, are the fn state each worktree had last on its first-parent line (\"\" for commits
-  without a Worktree trailer: trace main, older traces); :cur is the one it holds. A worktree seen for the
+  {path blob}}}}, are the fn state each worktree had last on its first-parent line (\"=main\" for trace
+  main, \"\" for session commits without a Worktree trailer); :cur is the one it holds. A worktree seen for the
   first time starts from the line closest to it. done: the last run's {:heads {ref sha} :lines {ref
   {:cur w :by {w fn-sha}}}}."
   [s project heads commits done]
@@ -234,7 +235,7 @@
                       {:cur (:cur stored)
                        :by (into {} (for [[w f] (:by stored)]
                                       [w {:fn f :files (if (= w (:cur stored)) (clj-files c) (ctx-files f))}]))}
-                      {:cur "" :by {"" {:fn (earlier c) :files (clj-files c)}}})))
+                      {:cur "=main" :by {"=main" {:fn (earlier c) :files (clj-files c)}}})))
         lines-of (fn [c] (or (@mine c) (let [l (restore c)] (swap! mine assoc c l) l)))
         fn-at #(if-let [l (@mine %)] (fn-of l) (earlier %))
         root (delay (store/commit! s {:parents [] :tree {:base nil} :subject (str "fn layer of " project) :body ""
@@ -247,12 +248,12 @@
             text-in (fn [files fn-path] ; a definition's text in a line, by its fn path
                       (let [i (str/last-index-of fn-path "/")]
                         (get (defs (get files (subs fn-path 0 i) zero)) (subs fn-path (inc i)))))]
-        (doseq [{:keys [sha parents author committer worktree] :as c} chunk]
+        (doseq [{:keys [sha parents author committer worktree main?] :as c} chunk]
           (let [l (if-let [p1 (first parents)] (lines-of p1) {:cur "" :by {"" {:fn nil :files {}}}})
                 from (get-in l [:by (:cur l)])
                 entries (get ds sha)
                 state (reduce (fn [m [_ nw path]] (if (= nw zero) (dissoc m path) (assoc m path nw))) (:files from) entries)
-                w (str worktree)
+                w (cond (seq worktree) worktree main? "=main" :else "")
                 line (or (get-in l [:by w])
                          (when (seq entries) ; a first visit: from the line that is closest to it
                            (apply min-key #(count (changes (between (:files %) state) defs))
@@ -278,7 +279,7 @@
                   l (when-not main? (lines-of sha))
                   named (if main?
                           {(fn-ref r) (fn-at sha)}
-                          (let [ws (remove #(and (= "" %) (> (count (:by l)) 1)) (keys (:by l)))
+                          (let [ws (remove #{"=main"} (keys (:by l)))
                                 nm #(if (= "" %) "_" (files/clean-key (fs/file-name %)))
                                 dup (set (keep (fn [[k v]] (when (> (count v) 1) k)) (group-by nm ws)))]
                             (into {} (for [w ws :let [n (nm w)]]
