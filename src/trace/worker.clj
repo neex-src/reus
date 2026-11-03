@@ -8,7 +8,7 @@
   (:worker) and the errors log, and the others go on: one bad event never stops the trace.
   `bb trace:retry` puts the failed ones back. A snapshot that was too slow for the hook is redone
   here without a time limit, so the worktree's index is warm for the next hook. Once an hour the
-  worker lets git pack the repo (`gc --auto`)."
+  worker lets git pack the repo (`gc --auto`). Idle after recording, it starts the fn layer's catch-up."
   (:require [babashka.fs :as fs]
             [babashka.process :as p]
             [cheshire.core :as json]
@@ -16,6 +16,7 @@
             [clojure.string :as str]
             [trace.disk :as disk]
             [trace.files :as files]
+            [trace.fns :as fns]
             [trace.git :as g]
             [trace.health :as health]
             [trace.record :as rec]
@@ -46,6 +47,11 @@
         (fs/create-dirs (files/failed-dir repo))
         (fs/move f (fs/path (files/failed-dir repo) (fs/file-name f)) {:replace-existing true})
         false))))
+
+(defn- wake-fns!
+  "The fn layer (trace.fns) catches up in a process of its own, for a trace repo that has one."
+  [repo]
+  (try (when (fns/on? repo) (fns/wake! repo)) (catch Throwable e (health/log! "worker fns" "" {} e))))
 
 (defn- pause-file [repo] (str (fs/path repo ".git" "trace-worker.pause")))
 
@@ -96,14 +102,14 @@
     (files/try-file-lock
      (files/worker-lock repo)
      (fn []
-       (loop [idle-since (System/currentTimeMillis)]
+       (loop [idle-since (System/currentTimeMillis) recorded? false]
          (let [n (drain* repo)
                now (System/currentTimeMillis)]
            (cond (fs/exists? (pause-file repo)) nil ; own-objects! wants the repo to itself
-                 (pos? n) (recur now)
+                 (pos? n) (recur now true)
                  (not (fs/exists? (fs/path repo ".git" "HEAD"))) nil ; the repo is gone
                  (> (- now idle-since) idle-ms) nil
-                 :else (do (gc! repo) (Thread/sleep 50) (recur idle-since)))))))
+                 :else (do (when recorded? (wake-fns! repo)) (gc! repo) (Thread/sleep 50) (recur idle-since false)))))))
     ;; a hook that spooled while this worker let go saw it still running: look once more
     (when (and (seq (files/entries (files/spool-dir repo)))
                (not (fs/exists? (pause-file repo)))
