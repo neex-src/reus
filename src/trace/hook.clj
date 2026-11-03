@@ -55,12 +55,12 @@
 
 (defn wake!
   "Start a worker for repo unless one is draining it: detached (its own session, stdio to its log),
-  so neither this hook nor Claude Code waits for it."
+  so neither this hook nor Claude Code waits for it; in the trace repo (the session's dir may be gone later)."
   [repo]
   (when (files/try-file-lock (files/worker-lock repo) (constantly true))
     (let [log (io/file (str (fs/path repo ".git" "trace-worker.log")))]
       (p/process {:in "" :out :append :out-file log :err :append :err-file log
-                  :extra-env {"TRACE_REPO" (str repo)}}
+                  :dir (str repo) :extra-env {"TRACE_REPO" (str repo)}}
                  "setsid" "-f" g/bb "--config" (str (fs/path g/home "bb.edn")) "-m" "trace.worker"))))
 
 (defn ensure-repo!
