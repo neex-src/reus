@@ -137,6 +137,7 @@
     (loop [[l & more] (str/split-lines out) cur nil acc {}]
       (cond (nil? l) acc
             (re-matches #"[0-9a-f]{40}" l) (recur more l acc)
+            (not (str/starts-with? l ":")) (recur more cur acc)
             :else (let [[meta path] (str/split l #"\t" 2)
                         [om nm o nw] (str/split (subs meta 1) #" ")]
                     (recur more cur (if (and cur (every? #{"100644" "100755" "000000"} [om nm]) (not (str/starts-with? path "\"")))
