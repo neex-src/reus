@@ -2,8 +2,8 @@
   "Is the trace working? Read from files of the trace repo only (no git, nothing heavy: a status bar
   runs it every few seconds).
 
-  .git/trace-health/hook.edn, worker.edn   {:failing-since :reason :event :session}: the first failing
-                                          time of the failure going on, the latest reason; deleted by
+  .git/trace-health/hook.edn, worker.edn  {:failing-since :reason :event :session}: the first failing
+  and fns.edn (trace.fns)                 time of the failure going on, the latest reason; deleted by
                                           the next event that succeeds in that part
   .git/trace-spool/                       events not recorded yet (behind: the oldest is over a minute old)
   .git/trace-failed/                      events the worker could not record (bb trace:retry spools them again)
@@ -100,7 +100,7 @@
 (defn- read-part [part] (try (edn/read-string (slurp (file part))) (catch Throwable _ nil)))
 
 (defn fail!
-  "Part (:hook or :worker) failed on an event (of the worktree root, when it is about one): the first
+  "Part (:hook, :worker or :fns) failed on an event (of the worktree root, when it is about one): the first
   failing-since is kept while it goes on."
   [part event input e & [root]]
   (let [since (or (:failing-since (read-part part)) (str (java.time.Instant/now)))]
@@ -126,12 +126,12 @@
        (catch Throwable _)))
 
 (defn state
-  "{:hook {...} :worker {...} :waiting n :oldest-ms :failed n}."
+  "{:hook {...} :worker {...} :fns {...} :waiting n :oldest-ms :failed n}."
   []
   (let [read #(try (edn/read-string (slurp (file %))) (catch Throwable _ nil))
         waiting (files/entries (files/spool-dir g/*repo*))
         failed (files/entries (files/failed-dir g/*repo*))]
-    {:hook (read :hook) :worker (read :worker)
+    {:hook (read :hook) :worker (read :worker) :fns (read :fns)
      :waiting (count waiting) :oldest-ms (some-> (first waiting) files/entry-ms)
      :failed (count failed)}))
 
@@ -144,11 +144,12 @@
 (defn problems
   "[[label since reason]] of what is wrong now."
   []
-  (let [{:keys [hook worker waiting oldest-ms failed]} (state)
+  (let [{:keys [hook worker fns waiting oldest-ms failed]} (state)
         unrecorded (try (unrecorded) (catch Throwable _ nil))]
     (cond-> []
       hook (conj ["hook failing" (:failing-since hook) (:reason hook)])
       worker (conj ["worker failing" (:failing-since worker) (:reason worker)])
+      fns (conj ["fn layer failing" (:failing-since fns) (str (:reason fns) " (bb trace:fns)")])
       (and oldest-ms (> (- (System/currentTimeMillis) oldest-ms) behind-ms))
       (conj ["behind" oldest-ms (str waiting " events not recorded yet")])
       (pos? failed) (conj ["events failed" nil (str failed " in .git/trace-failed (bb trace:retry)")])

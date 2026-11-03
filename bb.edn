@@ -44,6 +44,10 @@
                :requires ([trace.worker] [trace.git])
                :task (let [r trace.git/*repo*] (println (trace.worker/retry! r) "spooled again;" (trace.worker/drain! r) "recorded"))}
 
+  trace:fns {:doc "The fn layer (refs/fn/<project>/...): every Clojure definition's versions, parent 2 the trace commit; bb trace:fns [repo]  (the first run is the backfill, the worker keeps it up after)"
+             :requires ([trace.fns])
+             :task (apply trace.fns/-main *command-line-args*)}
+
   trace:probe {:doc "Was the transcript written when the hook fired? bb trace:probe [repo]"
                :requires ([trace.probe])
                :task (apply trace.probe/-main *command-line-args*)}
@@ -58,8 +62,8 @@
                       (System/exit (if (zero? (+ fail error)) 0 1)))}
 
   test {:doc "Every test of this repo (the shell.js one needs node)"
-        :requires ([clojure.test :as t] [trace.record-test] [trace.hook-test] [trace.replay-test] [trace.probe-test] [trace.store-test] [trace.turn-test] [trace.ignore-test] [trace.gui-test] [jsonl.read-test])
-        :task (let [{:keys [fail error]} (t/run-tests 'trace.record-test 'trace.hook-test 'trace.replay-test 'trace.probe-test 'trace.store-test 'trace.turn-test 'trace.ignore-test 'trace.gui-test 'jsonl.read-test)
+        :requires ([clojure.test :as t] [trace.record-test] [trace.hook-test] [trace.replay-test] [trace.probe-test] [trace.store-test] [trace.turn-test] [trace.ignore-test] [trace.gui-test] [trace.fns-test] [jsonl.read-test])
+        :task (let [{:keys [fail error]} (t/run-tests 'trace.record-test 'trace.hook-test 'trace.replay-test 'trace.probe-test 'trace.store-test 'trace.turn-test 'trace.ignore-test 'trace.gui-test 'trace.fns-test 'jsonl.read-test)
                     js (:exit (shell {:continue true} "node test/trace/shell_test.js"))]
                 (System/exit (if (and (zero? (+ fail error)) (zero? js)) 0 1)))}
 
