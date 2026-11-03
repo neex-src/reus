@@ -264,3 +264,23 @@ body:not(.split-on) .split { display: none; }
 .steps.nested { margin-top: 4px; }
 .pr .when .sess { font-family: 'JetBrains Mono', monospace; font-size: 10.5px; }
 .agent-run .brief { font-size: 13px; color: var(--muted); max-height: 9em; overflow: hidden; margin: 4px 0 8px; }
+
+/* the fn layer: definitions and their versions */
+.fnq { width: min(480px, 100%); font: 14px var(--mono); padding: 6px 10px; margin: 6px 0 14px;
+  border: 1px solid var(--line); border-radius: 6px; background: var(--panel); color: var(--ink); }
+.fnfile { margin: 0 0 18px; }
+.fnfile h3 { font: 600 14px var(--mono); margin: 0 0 4px; }
+.fnfile h3 a { color: var(--ink); }
+tr.gone code { color: var(--muted); text-decoration: line-through; }
+.badge { font-size: 11px; color: var(--muted); border: 1px solid var(--line); border-radius: 9px; padding: 0 7px; margin-left: 8px; }
+h1.path small { font: 400 14px var(--ui); color: var(--muted); }
+.fnv .evo-h { display: flex; flex-wrap: wrap; gap: 8px; align-items: baseline; }
+.fnv .vno { font: 600 12px var(--mono); color: var(--muted); min-width: 30px; }
+.fnv .kind { font: 600 12px var(--mono); }
+.fnv.st-A .kind { color: var(--add); } .fnv.st-D .kind { color: var(--del); } .fnv.st-M .kind { color: var(--hunk); }
+.fnv .line { font: 11.5px var(--mono); border-radius: 9px; padding: 1px 8px; background: var(--sunk); border: 1px solid var(--line); }
+.fnv .line.main { background: var(--add-bg); color: var(--add); border-color: var(--add); }
+.fnv .wt { font: 11.5px var(--mono); color: var(--muted); }
+.fnv .t { margin-left: auto; font: 11.5px var(--mono); color: var(--muted); }
+.fnv.on-main { border-left: 3px solid var(--add); }
+.fnv.st-R { opacity: .8; } .fnv.st-R .kind { color: var(--muted); font-weight: 400; }

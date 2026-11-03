@@ -14,9 +14,12 @@
     /p/<session8>@NN?m=a    prompt NN of a session of a
     /files?m=a           every file a edited
     /file?m=a&path=P     every edit of P, in order: the file's evolution
+    /fns?m=a[&file=F]    every Clojure definition a ever had (the fn layer, trace.fns)
+    /fn?m=a&path=F/D     every version of definition D of file F, oldest first: its evolution
     /x/show?r=REV        git cat-file -p REV (a blob sha, or <commit>:<path>)
     /x/diff?c=SHA[&path=P]   that commit's change outside reads/ and doto.md
     /x/net?m=a&p=NN      the net change of a prompt
+    /x/bdiff?a=SHA&b=SHA  git diff of two blobs (a definition's versions)
     /x/tips?m=a          a's branch tips, running prompts, newest prompt: the live poll"
   (:require [babashka.fs :as fs]
             [cheshire.core :as json]
@@ -26,6 +29,7 @@
             [org.httpkit.server :as srv]
             [trace.git :as g :refer [git]]
             [trace.agents :as agents]
+            [trace.fnlog :as fl]
             [trace.read :refer [tips mains prompt-nos prompt-data all-prompts live-branches ext-lang central?]])
   (:import [java.net URLDecoder URLEncoder]
            [java.time Instant ZoneId]
@@ -305,7 +309,8 @@
    [:nav
     [:a {:href (str "/?" (m-param ms)) :class (when (= current :prompts) "on")} "Prompts"]
     (for [m ms]
-      [:a {:href (str "/files?m=" (enc m)) :class (when (= current m) "on")} (str "Files · " m)])]
+      (list [:a {:href (str "/files?m=" (enc m)) :class (when (= current m) "on")} (str "Files · " m)]
+            (when (fl/on? m) [:a {:href (str "/fns?m=" (enc m)) :class (when (= current [:fns m]) "on")} (str "Functions · " m)])))]
    [:div.live
     [:span#livestate.state "watching"]
     [:label {:title "Show each command of a shell step with the output it printed. A guess: shell output has no separators, so commands are told apart by echo markers and by the shape of their lines."}
@@ -434,6 +439,7 @@
            [:main.wide
             [:h1.path path]
             [:p.sub (count edits) " edits by " main ". "
+             (when (and (fl/on? main) (re-find #"\.(clj|cljs|cljc|bb)$" path)) [:a {:href (str "/fns?m=" (enc main) "&file=" (enc path))} "Its definitions, one by one. "])
              (for [o others] [:a {:href (str "/file?m=" (enc o) "&path=" (enc path))} (str "Same file in " o)])]
             (lazy "The file after its last edit here"
                   (str "/x/show?r=" (enc (str now ":" path))) :kind "code" :lang (ext-lang path) :cls "nested")
@@ -447,6 +453,97 @@
                  [:span.ptext (clip (or (prompt-title (:prompt d)) (:prompt d)) 110)]
                  [:span.delta [:b.add (str "+" (:add s))] " " [:b.del (str "−" (:del s))]]]
                 (lazy "Diff" (str "/x/diff?c=" (:sha s) "&path=" (enc path)) :kind "diff" :open? true)])]]])))
+
+;; --- the fn layer -----------------------------------------------------------
+
+(defn- fn-split
+  "A definition path <file>/<name> as [file name], the name as written (trace.fns writes / as %2F)."
+  [path]
+  (let [i (str/last-index-of path "/")]
+    [(subs path 0 i) (str/replace (subs path (inc i)) "%2F" "/")]))
+
+(defn- fns-page [tips main only]
+  (let [ix (fl/index main)
+        now (fl/on-main main)
+        files (->> (group-by (comp first fn-split key) ix)
+                   (filter #(or (nil? only) (= only (key %))))
+                   (sort-by (fn [[_ es]] (- (apply max (map (comp :last val) es))))))]
+    (page (str "Functions · " main)
+          [:div.app
+           (topbar tips [:fns main] [main])
+           [:main.wide
+            [:h1 (if only [:span "Definitions of " [:span.path only]] (str "Functions of " main))]
+            [:p.sub (reduce + (map (comp count val) files)) " definitions in " (count files) " files, "
+             (count (filter now (mapcat (comp keys val) files))) " of them on main now. "
+             "Each one's versions come from the fn layer (refs/fn/" main "/…): one version per change, from the call that made it. "
+             (when only [:a {:href (str "/fns?m=" (enc main))} "All files."])]
+            [:input#fnq.fnq {:type "search" :placeholder "filter: file or name" :autofocus true}]
+            (for [[file es] files]
+              [:section.fnfile
+               [:h3 [:a {:href (str "/file?m=" (enc main) "&path=" (enc file))} file]]
+               [:table.files
+                [:tbody
+                 (for [[path {:keys [n last]}] (sort-by (comp - :last val) es)
+                       :let [[_ nm] (fn-split path)]]
+                   [:tr {:data-q (str/lower-case path) :class (when-not (now path) "gone")}
+                    [:td [:a {:href (str "/fn?m=" (enc main) "&path=" (enc path))} [:code nm]]
+                     (when-not (now path) [:span.badge "not on main"])]
+                    [:td.num n (if (= 1 n) " text" " texts")]
+                    [:td.num (stamp last)]])]]])]])))
+
+(defn- version-chips
+  "Where a version was made: main, or the session (and worktree), linked to the prompt step."
+  [main branch v]
+  (let [[_ nn i] (re-find #"^([\w-]+)\.(\d+) " (str (:trace-subject v)))
+        suf (some->> branch (re-find #"/[sa]/(.+)$") second)
+        id (when (and suf nn) (str suf "@" nn))]
+    (list
+     (cond
+       (:main? v) [:span.line.main "main"]
+       suf [:span.line (str "session " (subs suf 0 (min 8 (count suf))) (when (str/includes? suf "-") " · agent"))]
+       :else [:span.line "session (branch gone)"])
+     (when-let [w (:worktree v)] [:span.wt {:title w} (fs/file-name w)])
+     (if id
+       [:a.chip {:href (str "/p/" (enc (parent-id id)) "?m=" (enc main) "#" (enc (str main "-" id "-" i)))}
+        (str "prompt " (chip-text id) " · step " i)]
+       (when (:main? v) [:span.chip "commit"])))))
+
+(defn- fn-page [tips main path]
+  (let [vs (fl/versions main path)
+        br (fl/where main vs)
+        [vs flips] (fl/unflip #(get br (:trace %)) vs)
+        [file nm] (fn-split path)
+        lang (ext-lang file)
+        now ((fl/on-main main) path)
+        word {"A" "added" "M" "changed" "D" "removed" "R" "same text reached"}]
+    (page (str nm " · " main)
+          [:div.app
+           (topbar tips [:fns main] [main])
+           [:main.wide
+            [:h1.path [:code nm] [:small " in " [:a {:href (str "/fns?m=" (enc main) "&file=" (enc file))} file]]]
+            [:p.sub (count vs) (if (= 1 (count vs)) " version" " versions") ", oldest first. "
+             (if now "On main now." "Not on main now.")
+             (when (pos? flips) (str " " flips " remove-and-add flips of older traces folded (a session that wrote in two checkouts)."))]
+            (when-let [blob (if now (str/trim (git "rev-parse" (str "refs/fn/" main "/main:" path))) (some :new (reverse (remove #(= "D" (:status %)) vs))))]
+              (lazy (if now "As it is on main" "Its last text") (str "/x/show?r=" (enc blob)) :kind "code" :lang lang :cls "nested"))
+            [:ol.evo
+             (for [[k v] (map-indexed vector vs)
+                   :let [again (and (not= "D" (:status v)) (some #(= (:new v) (:new %)) (take k vs)))
+                         st (if again "R" (:status v))]]
+               [:li {:class (str "evo-item fnv " (if (:main? v) "on-main" "in-session") " st-" st)}
+                [:div.evo-h
+                 [:span.vno (str "v" (inc k))]
+                 [:span.kind (word st)]
+                 (version-chips main (get br (:trace v)) v)
+                 [:span.ptext (clip (str/replace (str (:trace-subject v)) #"^[\w-]+\.\d+ " "") 110)]
+                 [:span.t (stamp (:ct v))]]
+                (case st
+                  "A" (lazy "Code" (str "/x/show?r=" (:new v)) :kind "code" :lang lang :open? true)
+                  "D" (lazy "Code it had" (str "/x/show?r=" (:old v)) :kind "code" :lang lang)
+                  "R" (lazy "Code" (str "/x/show?r=" (:new v)) :kind "code" :lang lang)
+                  (list (lazy "Diff against the version before" (str "/x/bdiff?a=" (:old v) "&b=" (:new v)) :kind "diff" :open? (not (:main? v)))
+                        (lazy "Code at this version" (str "/x/show?r=" (:new v)) :kind "code" :lang lang)))
+                [:div.commit "fn commit " [:code (subs (:sha v) 0 10)] " · trace commit " [:code (subs (:trace v) 0 10)]]])]]])))
 
 ;; --- http -----------------------------------------------------------------
 
@@ -484,6 +581,14 @@
 
         (= uri "/files") (html (files-page tips (get q "m")))
         (= uri "/file") (html (file-page tips (get q "m") (get q "path")))
+        (= uri "/fns") (html (fns-page tips (get q "m") (get q "file")))
+        (= uri "/fn") (html (fn-page tips (get q "m") (get q "path")))
+
+        (= uri "/x/bdiff")
+        (let [a (get q "a" "") b (get q "b" "")]
+          (if (and (re-matches sha-re a) (re-matches sha-re b))
+            (text (str/join "\n" (remove #(re-find #"^(diff --git|index |--- |\+\+\+ )" %) (str/split-lines (git "diff" a b)))))
+            bad))
 
         (= uri "/x/show")
         (let [r (get q "r" "")]
