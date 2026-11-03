@@ -265,3 +265,16 @@
     poll();
   }
 })();
+
+// the definitions page: filter by file or name
+(function () {
+  const q = document.getElementById('fnq');
+  if (!q) return;
+  const rows = Array.from(document.querySelectorAll('tr[data-q]'));
+  const secs = Array.from(document.querySelectorAll('section.fnfile'));
+  q.addEventListener('input', () => {
+    const v = q.value.trim().toLowerCase();
+    rows.forEach((tr) => { tr.hidden = v && !tr.dataset.q.includes(v); });
+    secs.forEach((s) => { s.hidden = !s.querySelector('tr[data-q]:not([hidden])'); });
+  });
+})();

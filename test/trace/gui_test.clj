@@ -6,6 +6,7 @@
             [cheshire.core :as json]
             [clojure.string :as str]
             [clojure.test :refer [deftest is testing]]
+            [trace.fns :as fns]
             [trace.git :as g]
             [trace.gui :as gui]
             [trace.record :as rec])
@@ -94,5 +95,16 @@
         (is (str/includes? (:body (get* "/files?m=proj")) "a.clj"))
         (let [body (:body (get* "/file?m=proj&path=a.clj"))]
           (doseq [src (srcs body)] (is (= 200 (:status (get* src))) src))))
+      (testing "the fn layer: every definition, and the versions of one with the step that made each"
+        (is (not (str/includes? (:body (get* "/files?m=proj")) "Functions · proj")))
+        (fns/run! g/*repo*)
+        (let [body (:body (get* "/fns?m=proj"))]
+          (is (str/includes? body "Functions · proj"))
+          (is (str/includes? body "/fn?m=proj&amp;path=a.clj%2Ff")))
+        (let [body (:body (get* "/fn?m=proj&path=a.clj%2Ff"))]
+          (is (str/includes? body "changed"))
+          (is (str/includes? body "/p/s1%4000?m=proj#proj-s1%4000-"))
+          (doseq [src (srcs body)] (is (= 200 (:status (get* src))) src))
+          (is (some #(str/includes? (:body (get* %)) "+(defn f [] 2)") (filter #(str/starts-with? % "/x/bdiff") (srcs body))))))
       (testing "a missing object is a 404 that says what is missing"
         (is (= 404 (:status (get* (str "/x/show?r=" (apply str (repeat 40 "0")))))))))))
