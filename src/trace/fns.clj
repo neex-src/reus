@@ -331,7 +331,7 @@
   (when (files/try-file-lock (lock-file repo) (constantly true))
     (let [log (io/file (str (fs/path repo ".git" "trace-worker.log")))]
       (p/process {:in "" :out :append :out-file log :err :append :err-file log
-                  :extra-env {"TRACE_REPO" (str repo)}}
+                  :dir (str repo) :extra-env {"TRACE_REPO" (str repo)}}
                  "setsid" "-f" g/bb "--config" (str (fs/path g/home "bb.edn")) "-m" "trace.fns" "--quiet"))))
 
 (defn -main
