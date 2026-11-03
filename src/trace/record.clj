@@ -27,8 +27,8 @@
 
   Commit messages end in trailers: Tool, File, Exit, Error, Duration-Ms, Model, Tokens-In,
   Tokens-Out, Cache-Read, Cache-Write, Prompt-Id, Agent, Cwd, Real-Head (the worktree's HEAD at that
-  moment), Agent-Report (the tip of an agent whose report this turn got, which is no parent link),
-  Snapshot-Error (the worktree could not be hashed: the tree is the previous one). Model and tokens
+  moment), Worktree (the root of the worktree the tree is of: trace.fns keeps a line per worktree),
+  Agent-Report (the tip of an agent whose report this turn got, which is no parent link), Snapshot-Error (the worktree could not be hashed: the tree is the previous one). Model and tokens
   come from the transcript; a payload without one may bring them as `model` and `usage` (moot feeds
   a deepseek exchange as UserPromptSubmit / Stop with last_assistant_message). Notes:
   refs/notes/event is the hook stdin verbatim, turn what the transcript adds (trace.turn), output the
@@ -251,14 +251,15 @@
 
 (defn- commit-on!
   "A commit on branch: the tree spec snap (a worktree's snapshot; nil: the branch's previous tree)
-  with .claude-trace ttree; head is its Real-Head and is remembered as the branch's work on it."
-  [x branch snap head ttree subject body pairs]
+  with .claude-trace ttree; head is its Real-Head and is remembered as the branch's work on it, root
+  the worktree that tree is of (Worktree)."
+  [x branch snap head root ttree subject body pairs]
   (let [parent (tip x branch)
         spec (cond snap snap parent {:keep true} :else {:base nil})
         c (store/commit! (:s x) {:parents (vec (remove nil? [parent]))
                                  :tree (assoc spec :subtrees {".claude-trace" ttree})
                                  :subject subject
-                                 :body (with-trailers body (concat pairs [["Real-Head" head]]))})]
+                                 :body (with-trailers body (concat pairs [["Real-Head" head] ["Worktree" root]]))})]
     (note-head! x head branch)
     (advance! x branch c)
     c))
@@ -283,7 +284,7 @@
           (let [parent-b (when-let [pk (:parent a)] (get-in (actor x pk) [:branches project :branch]))]
             (advance! x branch (or (some->> parent-b (tip x)) (tip x (main-branch project))))))
         (let [head (or head (:thead b))
-              c (commit-on! x branch snap head (:ttree a) (:subject a)
+              c (commit-on! x branch snap head (if snap (:root p) (or (:root b) (:root p))) (:ttree a) (:subject a)
                             (or body (str "session " (:session a) "\ncwd " (:cwd a) "\nroot " (:root p)))
                             (or pairs [["Cwd" (:cwd a)] ["Prompt-Id" (:prompt-id a)] ["Agent" (:agent-type a)]]))]
           [(assoc-in a [:branches project]
@@ -309,7 +310,7 @@
             (doseq [[project b] touched
                     :let [cur? (= project cur)]]
               (mirror! x (worktree-of-branch b))
-              (let [c (commit-on! x (:branch b) nil (:thead b) ttree (str "response " (:nn a)) ""
+              (let [c (commit-on! x (:branch b) nil (:thead b) (:root b) ttree (str "response " (:nn a)) ""
                                   (concat (when cur? (turn-trailers (:turn x)))
                                           (when cur? (reports-of x (:reports a)))
                                           [["Cwd" (:cwd a)]]))]
@@ -401,7 +402,7 @@
               rel (some->> (:file obs) (rel-of (:root p)))
               exit (some-> (re-find #"(?i)exit code:?\s*(\d+)" (subs text 0 (min 80 (count text)))) second)
               summary (if (and rel (not= cmd (get tool_input "command"))) rel (first-line cmd 70))
-              c (commit-on! x (:branch b) (:snap wt) head (:ttree a) (format "%s.%d %s: %s" (:nn a) k tool summary) cmd
+              c (commit-on! x (:branch b) (:snap wt) head (if wt (:root wt) (:root b)) (:ttree a) (format "%s.%d %s: %s" (:nn a) k tool summary) cmd
                             (concat [["Tool" tool] ["File" rel] ["Exit" exit]
                                      ["Error" (when bad? (first-line text 100))]]
                                     (turn-trailers (:turn x))
