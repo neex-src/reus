@@ -71,6 +71,13 @@
              (.update bs))]
     (apply str (map #(format "%02x" (bit-and % 0xff)) (.digest md)))))
 
+(defn- valid-path?
+  "Would git take path into a tree? (update-index refuses a .git component; both stores leave such
+  a file out of the commit.)"
+  [path]
+  (every? #(not (or (#{"" "." ".."} %) (= ".git" (str/lower-case (str/replace % #"[ .]+$" "")))))
+          (str/split path #"/" -1)))
+
 (def ^:private raw-ns #{:prev})
 (defn- ns-dir [ns] (str "trace-" (name ns)))
 
@@ -128,6 +135,26 @@
       (when-not (zero? (:exit r))
         (throw (ex-info "could not copy a tree into the trace repo" {:tree tree :from from :err (:err r)}))))))
 
+(defn- tmp-path
+  "A path under .git/trace-tmp/ that no other process or call uses (its dir made)."
+  [repo suffix]
+  (let [p (gitdir repo "trace-tmp" (str (.pid (java.lang.ProcessHandle/current)) "-" (System/nanoTime) suffix))]
+    (fs/create-dirs (fs/parent p))
+    p))
+
+(defn- live-blobs
+  "The shas of contents, written as blobs by one hash-object."
+  [repo contents]
+  (if (empty? contents)
+    []
+    (let [dir (tmp-path repo "")
+          paths (map-indexed (fn [i _] (str (fs/path dir (str i)))) contents)]
+      (fs/create-dirs dir)
+      (try
+        (doseq [[p c] (map vector paths contents)] (with-open [o (java.io.FileOutputStream. ^String p)] (.write o (bytes-of c))))
+        (str/split-lines (git! "hash-object" "-w" "--stdin-paths" {:in (str (str/join "\n" paths) "\n")}))
+        (finally (fs/delete-tree dir))))))
+
 (defn- live-tree
   "The sha of tree spec T (see ns)."
   [repo {:keys [base subtrees changes]}]
@@ -143,32 +170,36 @@
         (git! "mktree" "-z" {:in (str/join (concat (map #(str % "\u0000") ls)
                                                    (map (fn [[d t]] (str "040000 tree " t "\t" d "\u0000")) subtrees)))}))
 
-      :else
-      (let [env {:extra-env {"GIT_INDEX_FILE" (gitdir repo "trace-index-tmp")}}]
-        (git! "read-tree" base env)
-        (doseq [[d t] subtrees] (git! "read-tree" (str "--prefix=" d "/") t env))
-        (doseq [[path content] changes]
-          (if (nil? content)
-            (git! "update-index" "--force-remove" path env)
-            (git! "update-index" "--add" "--cacheinfo" (str "100644," (live-blob content) "," path) env)))
-        (git! "write-tree" env)))))
+      :else ; a private index per call (trace.fns builds trees beside the worker), the blobs in one go
+      (let [index (tmp-path repo ".index")
+            env {:extra-env {"GIT_INDEX_FILE" index}}
+            changes (filter (comp valid-path? key) changes)
+            sets (vec (remove (comp nil? val) changes))
+            shas (zipmap (map key sets) (live-blobs repo (map val sets)))]
+        (try
+          (git! "read-tree" base env)
+          (doseq [[d t] subtrees] (git! "read-tree" (str "--prefix=" d "/") t env))
+          (git! "update-index" "--index-info"
+                (assoc env :in (str/join (for [[path content] changes]
+                                           (if (nil? content)
+                                             (str "0 0000000000000000000000000000000000000000\t" path "\n")
+                                             (str "100644 " (shas path) "\t" path "\n"))))))
+          (git! "write-tree" env)
+          (finally (fs/delete-if-exists index)))))))
 
 (defn- live-tree!
   "A tree of {path content}: the blobs hashed in one go, the tree through a private index."
   [repo files]
-  (let [dir (gitdir repo "trace-tmp" (str (.pid (java.lang.ProcessHandle/current)) "-" (System/nanoTime)))
+  (let [index (tmp-path repo ".index")
         files (vec files)
-        paths (map-indexed (fn [i _] (str (fs/path dir (str i)))) files)
-        env {:extra-env {"GIT_INDEX_FILE" (str dir ".index")}}]
-    (fs/create-dirs dir)
+        shas (live-blobs repo (map val files))
+        env {:extra-env {"GIT_INDEX_FILE" index}}]
     (try
-      (doseq [[p [_ c]] (map vector paths files)] (with-open [o (java.io.FileOutputStream. ^String p)] (.write o (bytes-of c))))
-      (let [shas (str/split-lines (git! "hash-object" "-w" "--stdin-paths" {:in (str (str/join "\n" paths) "\n")}))]
-        (git! "read-tree" "--empty" env)
-        (git! "update-index" "--add" "--index-info"
-              (assoc env :in (str/join (map (fn [[path _] sha] (str "100644 " sha "\t" path "\n")) files shas))))
-        (git! "write-tree" env))
-      (finally (fs/delete-tree dir) (fs/delete-if-exists (str dir ".index"))))))
+      (git! "read-tree" "--empty" env)
+      (git! "update-index" "--add" "--index-info"
+            (assoc env :in (str/join (map (fn [[path _] sha] (str "100644 " sha "\t" path "\n")) files shas))))
+      (git! "write-tree" env)
+      (finally (fs/delete-if-exists index)))))
 
 (defrecord Live [repo]
   Store
@@ -238,13 +269,6 @@
   (if (re-find #"[\n\"\\]|^\"" p)
     (str "\"" (-> p (str/replace "\\" "\\\\") (str/replace "\"" "\\\"") (str/replace "\n" "\\n")) "\"")
     p))
-
-(defn- valid-path?
-  "Would git take path into a tree? (update-index refuses a .git component, which the live
-  store then silently leaves out of the commit.)"
-  [path]
-  (every? #(not (or (#{"" "." ".."} %) (= ".git" (str/lower-case (str/replace % #"[ .]+$" "")))))
-          (str/split path #"/" -1)))
 
 (defn- emit-blob!
   "The mark of content in the stream, written when it is new."
