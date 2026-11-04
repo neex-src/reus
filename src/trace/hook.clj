@@ -53,15 +53,21 @@
     (files/spit-atomic f (pr-str entry))
     f))
 
+(defn- detach
+  "The command words that start a process in a session of its own: setsid -f. A machine without setsid (macOS)
+  starts it plainly; it outlives the hook all the same, only a signal to the hook's process group would reach it."
+  []
+  (if (fs/which "setsid") ["setsid" "-f"] []))
+
 (defn wake!
   "Start a worker for repo unless one is draining it: detached (its own session, stdio to its log),
   so neither this hook nor Claude Code waits for it; in the trace repo (the session's dir may be gone later)."
   [repo]
   (when (files/try-file-lock (files/worker-lock repo) (constantly true))
     (let [log (io/file (str (fs/path repo ".git" "trace-worker.log")))]
-      (p/process {:in "" :out :append :out-file log :err :append :err-file log
-                  :dir (str repo) :extra-env {"TRACE_REPO" (str repo)}}
-                 "setsid" "-f" g/bb "--config" (str (fs/path g/home "bb.edn")) "-m" "trace.worker"))))
+      (apply p/process {:in "" :out :append :out-file log :err :append :err-file log
+                        :dir (str repo) :extra-env {"TRACE_REPO" (str repo)}}
+             (concat (detach) [g/bb "--config" (str (fs/path g/home "bb.edn")) "-m" "trace.worker"])))))
 
 (defn ensure-repo!
   "The trace repo, made when it is not there."

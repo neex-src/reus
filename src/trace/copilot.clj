@@ -76,19 +76,53 @@
     (with-open [r (clojure.java.io/reader f)]
       (some-> (first (line-seq r)) (json/parse-string) (get-in ["data" "selectedModel"])))))
 
+(defn usage-of
+  "Claude's usage map (input_tokens = the uncached part; Copilot's inputTokens counts the cached too) of
+  Copilot usage records, summed; nil for none."
+  [us]
+  (when (seq us)
+    (let [sum (fn [k] (reduce + 0 (keep #(get % k) us)))
+          read (sum "cacheReadTokens") write (sum "cacheWriteTokens")]
+      {:input_tokens (max 0 (- (sum "inputTokens") read write)) :output_tokens (sum "outputTokens")
+       :cache_read_input_tokens read :cache_creation_input_tokens write
+       :reasoning_tokens (sum "reasoningTokens") :copilot_cost (sum "cost")})))
+
 (defn turn-facts
   "{:reply :model :usage} of the last prompt's events: the last assistant text, the model that wrote it,
   the tokens of all its model calls (the transcript's key names)."
   [es]
   (let [t (this-turn es)
         said (last (filter #(and (= "assistant.message" (get % "type")) (not (str/blank? (get-in % ["data" "content"])))) t))
-        us (keep #(when (= "session.usage_record" (get % "type")) (get-in % ["data" "usage"])) t)
-        sum (fn [k] (reduce + 0 (keep #(get % k) us)))]
+        us (keep #(when (= "session.usage_record" (get % "type")) (get-in % ["data" "usage"])) t)]
     {:reply (get-in said ["data" "content"])
      :model (or (get-in said ["data" "model"]) (some #(get % "model") us))
-     :usage (when (seq us)
-              {:input_tokens (sum "inputTokens") :output_tokens (sum "outputTokens")
-               :cache_read_input_tokens (sum "cacheReadTokens") :cache_creation_input_tokens (sum "cacheWriteTokens")})}))
+     :usage (usage-of us)}))
+
+(defn- claude-name [n] (get claude-tools n n))
+
+(defn- millis [ts] (try (.toEpochMilli (java.time.Instant/parse ts)) (catch Exception _ nil)))
+
+(defn call-facts
+  "{:model :usage :duration-ms} of the tool call a PostToolUse hook is about, from the log: the model request
+  that asked for it is the earliest one in this prompt, for that tool and those arguments, whose call has not
+  completed yet (Copilot fires the hook before it writes tool.execution_complete). The tokens of a request go
+  to the first of its calls only (as with Claude's transcripts: the sum over the calls stays the request's).
+  Nil when the log does not show it."
+  [es tool-name args now-ms]
+  (let [t (this-turn es)
+        done (set (keep #(when (= "tool.execution_complete" (get % "type")) (get-in % ["data" "toolCallId"])) t))
+        reqs (for [m t :when (= "assistant.message" (get m "type"))
+                   [i r] (map-indexed vector (get-in m ["data" "toolRequests"]))
+                   :when (and (not (done (get r "toolCallId"))) (= tool-name (claude-name (get r "name"))))]
+               {:m m :i i :r r})
+        {:keys [m i r]} (or (first (filter #(= args (get-in % [:r "arguments"])) reqs)) (first reqs))]
+    (when r
+      (let [api (get-in m ["data" "apiCallId"])
+            started (some #(when (and (= "tool.execution_start" (get % "type")) (= (get r "toolCallId") (get-in % ["data" "toolCallId"]))) (millis (get % "timestamp"))) t)
+            us (when (zero? i) (filter #(= api (get % "apiCallId")) (keep #(when (= "session.usage_record" (get % "type")) (get-in % ["data" "usage"])) t)))]
+        (cond-> {:model (get-in m ["data" "model"])}
+          (seq us) (assoc :usage (usage-of us))
+          started (assoc :duration-ms (max 0 (- now-ms started))))))))
 
 (defn- stop-facts
   "turn-facts of the session's log; Copilot writes the answer before it fires Stop, a short wait covers a slow disk."
@@ -113,12 +147,16 @@
       [event
        (case event
          "prompt" (cond-> (assoc base "prompt" prompt) model (assoc "model" model))
-         "tool" (cond-> (assoc base
-                               "tool_name" (get claude-tools tool_name tool_name)
-                               "tool_input" (tool-input tool_input)
-                               "tool_response" (tool-response tool_result))
-                  error (assoc "error" error)
-                  model (assoc "model" model))
+         "tool" (let [{cm :model :keys [usage duration-ms]} (some-> (events-file in) read-events
+                                                                       (call-facts (claude-name tool_name) tool_input (or (millis (str (get in "timestamp"))) (System/currentTimeMillis))))]
+                  (cond-> (assoc base
+                                 "tool_name" (claude-name tool_name)
+                                 "tool_input" (tool-input tool_input)
+                                 "tool_response" (tool-response tool_result))
+                    error (assoc "error" error)
+                    (or cm model) (assoc "model" (or cm model))
+                    usage (assoc "usage" usage)
+                    duration-ms (assoc "duration_ms" duration-ms)))
          "stop" (let [{:keys [reply usage] smodel :model} (when (= "Stop" hook_event_name) (stop-facts in))]
                   (cond-> base
                     reply (assoc "last_assistant_message" reply)
