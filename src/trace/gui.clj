@@ -31,6 +31,7 @@
             [trace.agents :as agents]
             [trace.fnlog :as fl]
             [trace.mirror :as mirror]
+            [trace.runs :as runs]
             [trace.read :refer [tips mains prompt-nos prompt-data all-prompts live-branches ext-lang central?]])
   (:import [java.net URLDecoder URLEncoder]
            [java.time Instant ZoneId]
@@ -310,6 +311,7 @@
    [:nav
     [:a {:href (str "/?" (m-param ms)) :class (when (= current :prompts) "on")} "Prompts"]
     [:a {:href "/mirrors"} "Mirrors"]
+    [:a {:href "/runs"} "Runs"]
     (for [m ms]
       (list [:a {:href (str "/files?m=" (enc m)) :class (when (= current m) "on")} (str "Files · " m)]
             (when (fl/on? m) [:a {:href (str "/fns?m=" (enc m)) :class (when (= current [:fns m]) "on")} (str "Functions · " m)])))]
@@ -584,6 +586,7 @@
         (= uri "/files") (html (files-page tips (get q "m")))
         (= uri "/file") (html (file-page tips (get q "m") (get q "path")))
         (or (= uri "/mirrors") (str/starts-with? uri "/mirror/")) (or (mirror/route uri q) {:status 404 :body "not found"})
+        (or (= uri "/runs") (str/starts-with? uri "/runs/")) (or (runs/route uri) {:status 404 :body "not found"})
         (= uri "/fns") (html (fns-page tips (get q "m") (get q "file")))
         (= uri "/fn") (html (fn-page tips (get q "m") (get q "path")))
 

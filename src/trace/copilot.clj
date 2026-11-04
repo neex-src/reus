@@ -84,7 +84,8 @@
     (let [sum (fn [k] (reduce + 0 (keep #(get % k) us)))
           read (sum "cacheReadTokens") write (sum "cacheWriteTokens")]
       {:input_tokens (max 0 (- (sum "inputTokens") read write)) :output_tokens (sum "outputTokens")
-       :cache_read_input_tokens read :cache_creation_input_tokens write})))
+       :cache_read_input_tokens read :cache_creation_input_tokens write
+       :reasoning_tokens (sum "reasoningTokens")})))
 
 (defn turn-facts
   "{:reply :model :usage} of the last prompt's events: the last assistant text, the model that wrote it,
