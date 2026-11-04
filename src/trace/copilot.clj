@@ -85,7 +85,7 @@
           read (sum "cacheReadTokens") write (sum "cacheWriteTokens")]
       {:input_tokens (max 0 (- (sum "inputTokens") read write)) :output_tokens (sum "outputTokens")
        :cache_read_input_tokens read :cache_creation_input_tokens write
-       :reasoning_tokens (sum "reasoningTokens")})))
+       :reasoning_tokens (sum "reasoningTokens") :copilot_cost (sum "cost")})))
 
 (defn turn-facts
   "{:reply :model :usage} of the last prompt's events: the last assistant text, the model that wrote it,

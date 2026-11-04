@@ -77,7 +77,7 @@
 (defn- step-failed? [s] (boolean (:err s)))
 
 (defn- sum-usage [turns]
-  (apply merge-with + {} (map #(select-keys (:usage %) [:input_tokens :output_tokens :cache_read_input_tokens :cache_creation_input_tokens :reasoning_tokens]) turns)))
+  (apply merge-with + {} (map #(select-keys (:usage %) [:input_tokens :output_tokens :cache_read_input_tokens :cache_creation_input_tokens :reasoning_tokens :copilot_cost]) turns)))
 
 (defn prompt-metrics
   "Numbers of one prompt's data (trace.read/prompt-data): calls by kind, failed calls, lines, seconds, the turn."
@@ -127,8 +127,8 @@
             (p/shell {:out :string :err :string :continue true}
                      "sh" "-c" (str "git -C " (pr-str (str g/*repo*)) " archive " sha " | tar -x -C " (pr-str (str dir))))
             (fs/delete-tree (fs/path dir ".claude-trace"))
-            (let [res (p/shell {:dir (str dir) :out :string :err :out :continue true}
-                               "timeout" "120" "sh" "-c" cmd)
+            (let [res (apply p/shell {:dir (str dir) :out :string :err :out :continue true}
+                               (concat (when (fs/which "timeout") ["timeout" "120"]) ["sh" "-c" cmd]))
                   o (str (:out res))
                   r {:cmd cmd :exit (:exit res) :pass (tap-count o "pass") :fail (tap-count o "fail")
                      :out (if (> (count o) 6000) (subs o (- (count o) 6000)) o)}]
@@ -218,9 +218,10 @@ pre.checkout { white-space: pre-wrap; font-size: 12px; max-height: 320px; overfl
        (when (:cost m) (str " · " (usd (:cost m))))))
 
 (defn- summary-table [arms]
+  (let [units? (some #(pos? (or (get-in % [:total :usage :copilot_cost]) 0)) arms)]
   [:table.arms
    [:thead [:tr [:th "arm"] [:th "end state"] [:th "calls"] [:th "edits"] [:th "failed"] [:th "lines"] [:th "time"]
-            [:th "input"] [:th "output"] [:th "thinking"] [:th "cache read"] [:th "cost"]]]
+            [:th "input"] [:th "output"] [:th "thinking"] [:th "cache read"] [:th "cost"] (when units? [:th "Copilot units"])]]
    [:tbody
     (for [{:keys [arm total check] :as a} arms
           :let [u (:usage total)]]
@@ -234,7 +235,8 @@ pre.checkout { white-space: pre-wrap; font-size: 12px; max-height: 320px; overfl
        [:td (secs (:secs total))]
        [:td (thou (:input_tokens u))] [:td (thou (:output_tokens u))] [:td (thou (:reasoning_tokens u))]
        [:td (thou (:cache_read_input_tokens u))]
-       [:td (usd (:cost total))]])]])
+       [:td (usd (:cost total))]
+       (when units? [:td (:copilot_cost u)])])]]))
 
 (defn- task-page [tips task]
   (let [arms (->> (get (tasks tips) task)
