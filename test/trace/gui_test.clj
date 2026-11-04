@@ -6,6 +6,7 @@
             [cheshire.core :as json]
             [clojure.string :as str]
             [clojure.test :refer [deftest is testing]]
+            [trace.ash :as ash]
             [trace.fns :as fns]
             [trace.git :as g]
             [trace.gui :as gui]
@@ -32,6 +33,9 @@
     (@#'gui/handler {:uri (URLDecoder/decode path "UTF-8") :query-string q})))
 
 (defn- srcs [html] (map #(str/replace % "&amp;" "&") (map second (re-seq #"data-src=\"([^\"]+)\"" html))))
+
+(defmacro testing-ash [s & body]
+  `(testing ~s (if (ash/available?) (do ~@body) (println "skipped:" ~s "- ashamer is absent"))))
 
 (deftest pages-of-the-session-layout
   (let [proj (fresh!) a (str (fs/path proj "a.clj")) ign (str (fs/path proj "ignored" "x"))]
@@ -95,7 +99,7 @@
         (is (str/includes? (:body (get* "/files?m=proj")) "a.clj"))
         (let [body (:body (get* "/file?m=proj&path=a.clj"))]
           (doseq [src (srcs body)] (is (= 200 (:status (get* src))) src))))
-      (testing "the fn layer: every definition, and the versions of one with the step that made each"
+      (testing-ash "the fn layer: every definition, and the versions of one with the step that made each"
         (is (not (str/includes? (:body (get* "/files?m=proj")) "Functions · proj")))
         (fns/run! g/*repo*)
         (let [body (:body (get* "/fns?m=proj"))]

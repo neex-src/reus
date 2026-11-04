@@ -4,9 +4,15 @@
             [babashka.process :as p]
             [clojure.string :as str]
             [clojure.test :refer [deftest is testing]]
+            [trace.ash :as ash]
             [trace.fns :as fns]
             [trace.git :as g :refer [git]]
             [trace.record :as rec]))
+
+(defmacro deftest-ash
+  "A deftest of the fn layer: skipped where ashamer is absent (the sandbox), where only the layer needs it."
+  [nm & body]
+  `(deftest ~nm (if (ash/available?) (do ~@body) (println "skipped" '~nm ": ashamer is absent"))))
 
 (def scratch (str (fs/path (fs/parent (System/getProperty "babashka.config")) ".scratch" "fns-test")))
 
@@ -16,7 +22,7 @@
 (defn- log [& args] (vec (remove str/blank? (str/split-lines (apply git "log" args)))))
 (defn- parents [rev] (str/split (git "log" "-1" "--format=%P" rev) #" "))
 
-(deftest explode
+(deftest-ash explode
   (is (= {"ns" "(ns a\n  (:require [x]))\n" "f" "(defn ^:private f [] 1)\n" "x" "(def x 1)\n" "x~2" "(def x 2)\n"
           "area :circle" "(defmethod area :circle [c] 3)\n" "::k" "(s/def ::k int?)\n" "a%2Fb" "(defn a/b [])\n"}
          (fns/explode (str "(ns a\n  (:require [x]))\n\n;; c\n(defn ^:private f [] 1)\n(def x 1)\n(def x 2)\n"
@@ -28,7 +34,7 @@
 
 (defn- fn-refs [] (sort (str/split-lines (git "for-each-ref" "--format=%(refname) %(objectname)" "refs/fn/"))))
 
-(deftest fn-layer
+(deftest-ash fn-layer
   (fs/delete-tree scratch)
   (let [proj (str (fs/path scratch "proj")) wt (str (fs/path scratch "wt")) a (str (fs/path proj "a.clj"))]
     (fs/create-dirs proj)
@@ -106,7 +112,7 @@
           (is (= want (fn-refs)) "fast-import")
           (is (zero? (:exit (g/git* {} "fsck" "--connectivity-only" "--no-dangling")))))))))
 
-(deftest a-line-per-worktree
+(deftest-ash a-line-per-worktree
   (fs/delete-tree scratch)
   (let [proj (str (fs/path scratch "proj")) wt (str (fs/path scratch "wt")) b (str (fs/path wt "b.clj"))
         call (fn [cwd tool input] (ev "tool" {"session_id" "s3" "cwd" cwd "tool_name" tool "tool_input" input "tool_response" "ok"}))]
