@@ -64,9 +64,24 @@
               second
               (#(try (.toEpochMilli (java.time.Instant/parse %)) (catch Throwable _ nil)))))))
 
+(defn- cwd-of
+  "The cwd a transcript says (in its first 64 KB), nil when it says none."
+  [^java.io.File f]
+  (with-open [in (java.io.FileInputStream. f)]
+    (let [buf (byte-array 65536) n (.read in buf)]
+      (when (pos? n)
+        (some-> (re-find #"\"cwd\":\"([^\"]+)\"" (String. buf 0 n "UTF-8")) second)))))
+
+(defn test-scratch?
+  "Is cwd inside a test scratch of reus' own (the e2e runs: a .scratch/ dir with an e2e... dir somewhere below
+  it, e.g. <reus>/.scratch/e2e-2026.../proj, <reus>/.scratch/hidden/.scratch/e2e/...)? Those are not real
+  sessions; a session working in a .scratch worktree is."
+  [cwd]
+  (boolean (some->> cwd (re-find #"/\.scratch/(?:[^/]+/)*e2e[^/]*(?:/|$)"))))
+
 (defn unrecorded
   "[{:session :file :ms}] of the transcripts (~/.claude/projects/*/*.jsonl) written in the last unseen-ms,
-  idle for idle-ms, of sessions the hook never ran for, newest first; none while the hook is not installed
+  idle for idle-ms, of sessions the hook never ran for (not those of reus' own e2e runs, test-scratch?), newest first; none while the hook is not installed
   (bb trace:off) or before it marked anything. Written means an entry was added, not that the file was touched. A session started with --no-session-persistence leaves
   no transcript and is not seen here."
   []
@@ -81,7 +96,8 @@
                        (when (and (str/ends-with? n ".jsonl") (> ms from) (< ms (- now idle-ms)))
                          (let [session (subs n 0 (- (count n) 6))]
                            (when (and (not (.exists (fs/file *seen-dir* (files/clean-key session))))
-                                      (let [e (last-entry-ms f)] (or (nil? e) (> e from))))
+                                      (let [e (last-entry-ms f)] (or (nil? e) (> e from)))
+                                      (not (test-scratch? (cwd-of f))))
                              {:session session :file (str f) :ms ms}))))))
              (sort-by :ms >))))))
 
