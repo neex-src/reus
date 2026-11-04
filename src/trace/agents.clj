@@ -6,7 +6,8 @@
 
   (agent-id output)       the id in an Agent call's output, else nil
   (info session id input) {:model :effort :type :description :ms :calls :running?}
-                          or nil when the transcript is gone. :effort is the call's
+                          or nil when the transcript is gone (a Copilot run has none: its Agent step's
+                          input says model, effort, calls and time). :effort is the call's
                           effort input, else the `Effort: x` the brief states."
   (:require [babashka.fs :as fs]
             [cheshire.core :as json]
@@ -59,7 +60,7 @@
     (or (get @cache k) (let [s (scan f)] (swap! cache assoc k s) s))))
 
 (defn info [session id input]
-  (when-let [f (and session id (find-file session id ".jsonl"))]
+  (if-let [f (and session id (find-file session id ".jsonl"))]
     (let [meta (some-> (find-file session id ".meta.json") str slurp (json/parse-string true))
           {:keys [first last calls model]} (scan* f)
           age (some-> (ms-between last (str (Instant/now))) (max 0))]
@@ -69,7 +70,11 @@
        :description (or (:description meta) (get input "description"))
        :ms (ms-between first last)
        :calls calls
-       :running? (boolean (and age (< age 60000)))})))
+       :running? (boolean (and age (< age 60000)))})
+    ;; no Claude transcript: a Copilot run, whose Agent step carries what its log said (trace.copilot)
+    (when (get input "model")
+      {:model (get input "model") :effort (effort-of input) :type (get input "subagent_type")
+       :description (get input "description") :ms (get input "duration_ms") :calls (get input "calls")})))
 
 ;; --- task notifications -------------------------------------------------------
 

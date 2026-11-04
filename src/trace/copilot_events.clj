@@ -41,6 +41,21 @@
       (fn [i e]
         (let [d (get e "data") t (get e "type")]
           (cond
+            ;; a subagent: its own prompt and stop are no events; SubagentStart / SubagentStop are
+            (and (= "hook.start" t) (#{"userPromptSubmitted" "agentStop"} (get d "hookType")) (get e "agentId")) nil
+
+            (and (= "hook.start" t) (= "subagentStart" (get d "hookType")))
+            {:i i :es (subvec es 0 i)
+             :payload (assoc (base e "SubagentStart") "agent_id" (get-in d ["input" "agentId"]) "agent_type" (get-in d ["input" "agentType"])
+                             "parent_agent_id" sid "transcript_path" (str f))}
+
+            (and (= "hook.start" t) (= "subagentStop" (get d "hookType")))
+            (let [aid (get-in d ["input" "agentId"])
+                  said (last (filter #(and (= "assistant.message" (get % "type")) (= aid (get % "agentId")) (not (str/blank? (get-in % ["data" "content"])))) (subvec es 0 i)))]
+              {:i i :es (subvec es 0 i)
+               :payload (assoc (base e "SubagentStop") "agent_id" aid "agent_type" (get-in d ["input" "agentType"]) "parent_agent_id" sid
+                               "transcript_path" (str f) "last_assistant_message" (get-in said ["data" "content"]))})
+
             (and (= "hook.start" t) (= "userPromptSubmitted" (get d "hookType")))
             {:i i :es (subvec es 0 i) :payload (assoc (base e "UserPromptSubmit") "prompt" (get-in d ["input" "prompt"]))}
 
@@ -54,10 +69,12 @@
             (when-let [s (get starts (get d "toolCallId"))]
               (let [ok? (not (false? (get d "success")))]
                 {:i i :es (subvec es 0 i)
-                 :payload (assoc (base e (if ok? "PostToolUse" "PostToolUseFailure"))
+                 :payload (cond-> (assoc (base e (if ok? "PostToolUse" "PostToolUseFailure"))
                                  "tool_name" (get s "toolName") "tool_input" (get s "arguments")
                                  "tool_result" {"result_type" (if ok? "success" "failure")
-                                                "text_result_for_llm" (str (or (get-in d ["result" "content"]) (get-in d ["error" "message"]) (get d "error")))})}))
+                                                "text_result_for_llm" (str (or (get-in d ["result" "content"]) (get-in d ["error" "message"]) (get d "error")))})
+                            (get e "agentId") (assoc "agent_id" (get e "agentId") "parent_agent_id" sid
+                                                     "agent_type" (:type (cop/agent-info es (get e "agentId")))))}))
             :else nil)))
       es))))
 

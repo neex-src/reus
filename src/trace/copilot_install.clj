@@ -28,7 +28,7 @@
   (let [h [{"type" "command" "bash" (hook-command) "timeoutSec" 20}]]
     (json/generate-string
      {"version" 1
-      "hooks" (into {} (map (fn [e] [e h]) ["UserPromptSubmit" "PostToolUse" "PostToolUseFailure" "Stop" "SessionEnd"]))}
+      "hooks" (into {} (map (fn [e] [e h]) ["UserPromptSubmit" "PostToolUse" "PostToolUseFailure" "Stop" "SessionEnd" "SubagentStart" "SubagentStop"]))}
      {:pretty true})))
 
 (defn spit-hooks! [f]

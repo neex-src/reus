@@ -453,7 +453,8 @@
 (defn on-subagent-start [x {:strs [session_id agent_id agent_type cwd transcript_path] :as in}]
   (when agent_id
     (let [parent (actor x session_id)
-          a (new-agent x parent in (agent-brief x session_id agent_id transcript_path))
+          a (new-agent x parent in (or (not-blank (get in "brief")) ; a payload that brings the brief (Copilot's)
+                                     (agent-brief x session_id agent_id transcript_path)))
           obs (:obs x)
           p (or (get-in parent [:branches (:current parent)]) (:cwd-project obs))]
       (if p

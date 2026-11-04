@@ -1,0 +1,11 @@
+id: 2d083746-3e6f-4850-b41f-8a5d221fc330
+cwd: @PROJ@
+git_root: @PROJ@
+branch: main
+client_name: github/cli
+name: Launch one subagent with the task tool (agent_type explore) to read a.txt and b.txt and tell you their contents. Then create sum.txt containing both contents yourself.
+user_named: false
+summary_count: 0
+fork_count: 0
+created_at: 2026-11-04T05:07:56.906Z
+updated_at: 2026-11-04T05:07:57.017Z
