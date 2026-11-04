@@ -66,12 +66,13 @@
 (defn- session-of
   "The session of a project with the most prompts (the newest on a tie): its prompt ids."
   [tips project]
-  (->> (r/prompt-nos tips project)
-       (remove #(str/includes? (first (str/split % #"@")) "-")) ; an agent run is not the arm's session
-       (group-by #(first (str/split % #"@")))
-       vals
-       (sort-by (juxt count last))
-       last))
+  (let [ids (vec (remove #(str/includes? (first (str/split % #"@")) "-") ; an agent run is not the arm's session
+                         (r/prompt-nos tips project)))] ; oldest first
+    (->> ids
+         (group-by #(first (str/split % #"@")))
+         vals
+         (sort-by (juxt count #(.indexOf ^java.util.List ids (last %))))
+         last)))
 
 (defn- step-failed? [s] (boolean (:err s)))
 
