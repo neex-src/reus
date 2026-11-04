@@ -41,7 +41,18 @@
 (def ^:private claude-keys
   {"path" "file_path" "old_str" "old_string" "new_str" "new_string" "file_text" "content"})
 
-(defn tool-input [m] (update-keys (or m {}) #(get claude-keys % %)))
+(defn- patch-file
+  "The first file an apply_patch text (`*** Add File: p`, `*** Update File: p`, `*** Delete File: p`) is about."
+  [s]
+  (some-> (re-find #"(?m)^\*\*\* (?:Add|Update|Delete) File: (.+?)\s*$" s) second))
+
+(defn tool-input
+  "Claude-shaped tool input. A tool whose arguments are one string (the GPT models' apply_patch) becomes
+  {input text, file_path the patch's first file}."
+  [m]
+  (cond (map? m) (update-keys m #(get claude-keys % %))
+        (string? m) (cond-> {"input" m} (patch-file m) (assoc "file_path" (patch-file m)))
+        :else {}))
 
 (defn tool-response
   "Claude-shaped result text of a Copilot tool_result: the shell tail turned into an `Exit code K` head
@@ -70,11 +81,25 @@
     (subvec es (inc i))))
 
 (defn session-model
-  "The model the session runs: the first event (session.start) says it."
+  "The model the session runs: the first event (session.start) says it; for `auto` (the IntelliJ plugin's
+  default) the model Copilot's auto mode chose (session.auto_mode_resolved, among the first events)."
   [f]
   (when f
     (with-open [r (clojure.java.io/reader f)]
-      (some-> (first (line-seq r)) (json/parse-string) (get-in ["data" "selectedModel"])))))
+      (let [es (keep #(try (json/parse-string %) (catch Exception _ nil)) (take 12 (line-seq r)))
+            m (some-> (first es) (get-in ["data" "selectedModel"]))]
+        (if (= "auto" m)
+          (or (some #(when (= "session.auto_mode_resolved" (get % "type")) (get-in % ["data" "chosenModel"])) es) m)
+          m)))))
+
+(defn client-name
+  "The client that runs the session (workspace.yaml's client_name beside the log): `github/cli` for the CLI,
+  `copilot-intellij` for the IntelliJ plugin; nil when unknown."
+  [f]
+  (when f
+    (let [w (fs/path (fs/parent f) "workspace.yaml")]
+      (when (fs/regular-file? w)
+        (some-> (re-find #"(?m)^client_name:\s*(\S+)" (slurp (str w))) second)))))
 
 (defn usage-of
   "Claude's usage map (input_tokens = the uncached part; Copilot's inputTokens counts the cached too) of
@@ -145,8 +170,11 @@
   [in]
   (when-let [event (events (get in "hook_event_name"))]
     (let [{:strs [session_id cwd hook_event_name tool_name tool_input tool_result error prompt]} in
-          model (session-model (events-file in))
+          log (events-file in)
+          model (session-model log)
+          client (client-name log)
           base (cond-> {"session_id" session_id "cwd" cwd "hook_event_name" hook_event_name "copilot" in}
+                 client (assoc "client" client)
                  (str/blank? (str session_id)) (dissoc "session_id"))]
       [event
        (case event
