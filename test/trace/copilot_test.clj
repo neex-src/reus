@@ -56,7 +56,7 @@
       (spit (str (fs/path (fs/parent events) "workspace.yaml")) (sub (slurp (str (fs/path dir "workspace.yaml"))))))
     ;; the log as Copilot had written it when it ran hook k: up to that hook's hook.start
     (let [log (str/split-lines (sub (slurp (str (fs/path dir "events.jsonl")))))
-          types (re-pattern (str "\"hookType\":\"(userPromptSubmitted|postToolUse|postToolUseFailure|agentStop|sessionEnd"
+          types (re-pattern (str "\"hookType\":\"(userPromptSubmitted|postToolUse|postToolUseFailure|agentStop|sessionEnd|subagentStart|subagentStop"
                                  (when (some #(str/includes? % "\"SessionStart\"") payloads) "|sessionStart") ")\""))
           starts (vec (keep-indexed #(when (and (str/starts-with? %2 "{\"type\":\"hook.start\"") ; only the hooks reus subscribes (the IDE logs more)
                                           (re-find types %2)) %1) log))]
@@ -171,11 +171,11 @@
   "What a recorded event is made of. Not compared: the time of a call (the hook clock live, the log's when replayed)
   and a failed call's output (empty from the hook, the error text from the log)."
   [[event in]]
-  [event (cond-> (select-keys in ["hook_event_name" "tool_name" "tool_input" "tool_response" "prompt" "last_assistant_message" "model" "usage" "client"])
+  [event (cond-> (select-keys in ["hook_event_name" "tool_name" "tool_input" "tool_response" "prompt" "last_assistant_message" "model" "usage" "client" "agent_id" "agent_type" "brief" "effort"])
            (= "PostToolUseFailure" (get in "hook_event_name")) (dissoc "tool_response"))])
 
 (deftest the-log-gives-the-hook-payloads
-  (doseq [[name sid] [["create-view" "c8b099e7-0a22-4595-b477-5ebcddc076ad"] ["edit-fail" sid] ["ide-create" "355f079f-34c9-4994-b0b5-7cb86052f1f5"]]]
+  (doseq [[name sid] [["create-view" "c8b099e7-0a22-4595-b477-5ebcddc076ad"] ["edit-fail" sid] ["ide-create" "355f079f-34c9-4994-b0b5-7cb86052f1f5"] ["subagent" "2d083746-3e6f-4850-b41f-8a5d221fc330"]]]
     (testing name
       (let [dir (fs/path code "test" "copilot" name)
             home (str (fs/path scratch "ev" name))
@@ -189,10 +189,10 @@
             ;; the hooks reus subscribes, as the real payloads have them (the log up to the hook, like the hook saw it)
             real (map json/parse-string (str/split-lines (sub (str/replace (slurp (str (fs/path dir "payloads.jsonl"))) "@PROJ@" "@PROJ@"))))
             real (remove #(= "SessionStart" (get % "hook_event_name")) real)
-            starts (vec (keep-indexed #(when (and (= "hook.start" (get %2 "type")) (#{"userPromptSubmitted" "postToolUse" "postToolUseFailure" "agentStop" "sessionEnd"} (get-in %2 ["data" "hookType"]))) %1) es))
-            want (map (fn [r k] (facts (cop/adapt r {:es (subvec es 0 (if (= "Stop" (get r "hook_event_name")) (inc (nth starts k)) (nth starts k)))})))
-                      real (range))
-            got (map #(facts (cop/adapt (:payload %) {:es (:es %)})) ps)]
+            starts (vec (keep-indexed #(when (and (= "hook.start" (get %2 "type")) (#{"userPromptSubmitted" "postToolUse" "postToolUseFailure" "agentStop" "sessionEnd" "subagentStart" "subagentStop"} (get-in %2 ["data" "hookType"]))) %1) es))
+            want (keep (fn [[r k]] (some-> (cop/adapt r {:es (subvec es 0 (if (= "Stop" (get r "hook_event_name")) (inc (nth starts k)) (nth starts k)))}) facts))
+                       (map vector real (range)))
+            got (keep #(some-> (cop/adapt (:payload %) {:es (:es %)}) facts) ps)]
         (is (= (count want) (count got)))
         (is (= (map first want) (map first got)))
         (doseq [[w g] (map vector want got)]
@@ -215,3 +215,29 @@
           (is (= "response 00" (first subj)))
           (is (= 5 (count subj)) "init, prompt, two calls, response"))
         (is (str/includes? (git "notes" "--ref=event" "show" "proj/s/355f079f~1") "\"catchup\":true"))))))
+
+(deftest a-subagent-run-is-recorded-on-its-own-branch
+  (let [[repo _ b] (replay! "subagent" "2d083746-3e6f-4850-b41f-8a5d221fc330"
+                            (fn [proj {:strs [hook_event_name tool_name]}]
+                              (when (and (= "PostToolUse" hook_event_name) (= "Write" tool_name)) (put! proj "alpha\nbeta\n"))))]
+    (binding [g/*repo* repo]
+      (let [branches (str/split-lines (git "branch" "--format=%(refname:short)"))
+            ab (first (filter #(str/starts-with? % "proj/a/2d083746-") branches))
+            aid "62904397f0e84e8aa020438330b647ee"]
+        (is (some? ab) "the agent has a branch of its own")
+        (is (not-any? #(str/starts-with? % "proj/s/62904397") branches) "and is no session")
+        (is (= (str "proj/a/2d083746-" aid) ab))
+        (let [subj (str/split-lines (git "log" "--format=%s" ab))]
+          (is (= (str "response 00-a" aid) (first subj)))
+          (is (every? #(re-find #"^00-a\w+\.\d Read: " %) (take 2 (rest subj))) "its two reads")
+          (is (str/starts-with? (nth subj 3) (str "prompt 00-a" aid ": explore: Read the files a.txt and b.txt")) "the brief comes from the log"))
+        (is (= "claude-haiku-5-5" (trailer (str ab "~1") "Model")))
+        (is (some? (trailer ab "Tokens-Out")) "the agent\u0027s tokens are its own")
+        (is (str/includes? (git "show" (str ab ":.claude-trace/reply.md")) "alpha"))
+        (testing "the Agent step of the session names the run and carries what the log says of it"
+          (let [agent-step (first (filter #(str/includes? % "Agent") (str/split-lines (git "log" "--format=%H %s" b))))
+                note (json/parse-string (git "notes" "--ref=event" "show" (first (str/split agent-step #" "))))]
+            (is (str/includes? (get note "tool_response") (str "agentId: " aid)))
+            (is (= "claude-haiku-5-5" (get-in note ["tool_input" "model"])))
+            (is (= "low" (get-in note ["tool_input" "effort"])))
+            (is (= 2 (get-in note ["tool_input" "calls"])))))))))

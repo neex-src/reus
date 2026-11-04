@@ -36,7 +36,8 @@
             [trace.hook :as hook]))
 
 (def ^:private events
-  {"UserPromptSubmit" "prompt" "PostToolUse" "tool" "PostToolUseFailure" "tool" "Stop" "stop" "SessionEnd" "stop"})
+  {"UserPromptSubmit" "prompt" "PostToolUse" "tool" "PostToolUseFailure" "tool" "Stop" "stop" "SessionEnd" "stop"
+   "SubagentStart" "subagent-start" "SubagentStop" "subagent-stop"})
 
 (def ^:private claude-tools
   {"bash" "Bash" "powershell" "Bash" "view" "Read" "create" "Write" "edit" "Edit" "str_replace_editor" "Edit"
@@ -158,48 +159,124 @@
           (seq us) (assoc :usage (usage-of us))
           started (assoc :duration-ms (max 0 (- now-ms started))))))))
 
+(declare scoped)
+
+(defn- await-agent
+  "The session's events once they show subagent aid started (Copilot fires SubagentStart a moment before the log has it: 2 s at most)."
+  [in aid]
+  (loop [n 0]
+    (let [es (some-> (events-file {"session_id" (or (get in "parent_agent_id") (get in "session_id")) "transcript_path" (get in "transcript_path")}) read-events)]
+      (if (or (some #(and (= "subagent.started" (get % "type")) (= aid (get % "agentId"))) es) (>= n 10))
+        es
+        (do (Thread/sleep 200) (recur (inc n)))))))
+
 (defn- stop-facts
   "turn-facts of the session's log; Copilot writes the answer before it fires Stop, but the log may not have it on disk yet: wait (2 s at most) for the prompt's last message."
   [in]
   (loop [n 0]
     (let [f (events-file in)
-          r (some-> f read-events turn-facts)]
+          r (some-> f read-events scoped turn-facts)]
       (if (or (:final? r) (>= n 10))
         (assoc r :file f)
         (do (Thread/sleep 200) (recur (inc n)))))))
+
+;; --- subagents ------------------------------------------------------------------------------
+
+(defn- short-id [id] (some-> id (str/replace "-" "")))
+
+(defn scoped
+  "The events of one agent of the session (its id, as the log writes it at top level), the main agent's when nil."
+  [es & [aid]]
+  (filterv #(= aid (get % "agentId")) es))
+
+(defn agent-info
+  "What the log knows of subagent aid: {:model :effort :calls :ms :type :description :brief :tool-call}."
+  [es aid]
+  (let [of (fn [t] (some #(when (and (= t (get % "type")) (= aid (get % "agentId"))) (get % "data")) es))
+        s (of "subagent.started") c (of "subagent.configured") e (of "subagent.completed")
+        call (get s "toolCallId")]
+    {:model (or (get e "model") (get c "model") (get s "model")) :effort (get c "reasoningEffort")
+     :calls (get e "totalToolCalls") :ms (get e "durationMs")
+     :type (or (get s "agentType") (get s "agentName")) :description (get s "agentDescription") :tool-call call
+     :brief (some #(when (and (= "tool.execution_start" (get % "type")) (= call (get-in % ["data" "toolCallId"]))) (get-in % ["data" "arguments" "prompt"])) es)}))
+
+(defn agent-of-call
+  "The id of the subagent a `task` call (arguments tool-input, not completed yet in es) started, nil if the log does not show it."
+  [es tool-input]
+  (let [done (set (keep #(when (= "tool.execution_complete" (get % "type")) (get-in % ["data" "toolCallId"])) es))
+        tc (some #(when (and (= "tool.execution_start" (get % "type")) (= "task" (get-in % ["data" "toolName"]))
+                             (= tool-input (get-in % ["data" "arguments"])) (not (done (get-in % ["data" "toolCallId"]))))
+                    (get-in % ["data" "toolCallId"]))
+                 es)]
+    (some #(when (and (= "subagent.started" (get % "type")) (= tc (get-in % ["data" "toolCallId"]))) (get % "agentId")) es)))
+
+(defn- as-subagent-start
+  "Copilot hands SubagentStart over in the camelCase shape (no hook_event_name, `sessionId`): name it."
+  [in]
+  (if (and (str/blank? (str (get in "hook_event_name"))) (get in "agent_id") (get in "agentName"))
+    (assoc in "hook_event_name" "SubagentStart" "session_id" (get in "sessionId") "transcript_path" (get in "transcriptPath"))
+    in))
 
 ;; --- the adapter ------------------------------------------------------------------------
 
 (defn adapt
   "[event claude-shaped-input] for a Copilot hook payload (parsed), nil for an event that is not recorded. `es`: the
-  session's events as they were when the hook ran (trace.copilot-events replays a finished log); default: the log on disk."
-  [in & [{:keys [es]}]]
-  (when-let [event (events (get in "hook_event_name"))]
-    (let [{:strs [session_id cwd hook_event_name tool_name tool_input tool_result error prompt]} in
-          log (events-file in)
-          model (session-model log)
-          client (client-name log)
-          base (cond-> {"session_id" session_id "cwd" cwd "hook_event_name" hook_event_name "copilot" in}
-                 client (assoc "client" client)
-                 (str/blank? (str session_id)) (dissoc "session_id"))]
-      [event
-       (case event
-         "prompt" (cond-> (assoc base "prompt" prompt) model (assoc "model" model))
-         "tool" (let [{cm :model :keys [usage duration-ms]} (some-> (or es (some-> (events-file in) read-events))
-                                                                       (call-facts (claude-name tool_name) tool_input (or (millis (str (get in "timestamp"))) (System/currentTimeMillis))))]
-                  (cond-> (assoc base
-                                 "tool_name" (claude-name tool_name)
-                                 "tool_input" (tool-input tool_input)
-                                 "tool_response" (tool-response tool_result))
-                    error (assoc "error" error)
-                    (or cm model) (assoc "model" (or cm model))
-                    usage (assoc "usage" usage)
-                    duration-ms (assoc "duration_ms" duration-ms)))
-         "stop" (let [{:keys [reply usage] smodel :model} (when (= "Stop" hook_event_name) (if es (turn-facts es) (stop-facts in)))]
-                  (cond-> base
-                    reply (assoc "last_assistant_message" reply)
-                    (or smodel model) (assoc "model" (or smodel model))
-                    usage (assoc "usage" usage))))])))
+  session's events as they were when the hook ran (trace.copilot-events replays a finished log); default: the log on disk.
+
+  A subagent's own events (its tool calls, SubagentStart / SubagentStop) come with the agent's id as `session_id`
+  and `agent_id`, the session as `parent_agent_id`: they get the session as session_id and the agent's id
+  (without dashes, as Claude's are) as agent_id, so trace.record keeps them on the agent's branch. The agent's own
+  prompt and Stop are not events (SubagentStart carries its brief, SubagentStop its last message). A `task` call
+  (the Agent step) names its agent (`agentId: ...` after the reply, as Claude's) and carries its model, effort,
+  calls and time as input keys."
+  [in0 & [{:keys [es]}]]
+  (let [in (as-subagent-start in0)]
+    (when-let [event (events (get in "hook_event_name"))]
+      (let [{:strs [cwd hook_event_name tool_name tool_input tool_result error prompt agent_id agent_type parent_agent_id]} in
+            session_id (if agent_id (or parent_agent_id (get in "session_id")) (get in "session_id"))
+            log (events-file {"session_id" session_id "transcript_path" (get in "transcript_path")})
+            all (or es (some-> log read-events))
+            model (session-model log)
+            client (client-name log)
+            aid (short-id agent_id)
+            base (cond-> {"session_id" session_id "cwd" cwd "hook_event_name" hook_event_name "copilot" in0}
+                   client (assoc "client" client)
+                   agent_id (assoc "agent_id" aid "agent_type" agent_type)
+                   (str/blank? (str session_id)) (dissoc "session_id"))]
+        (when-not (and agent_id (#{"prompt" "stop"} event))
+          [event
+           (case event
+             "prompt" (cond-> (assoc base "prompt" prompt) model (assoc "model" model))
+             "tool" (let [mine (some-> all (scoped agent_id))
+                           {cm :model :keys [usage duration-ms]} (some-> mine (call-facts (claude-name tool_name) tool_input (or (millis (str (get in "timestamp"))) (System/currentTimeMillis))))
+                           run (when (and all (#{"task" "Agent"} tool_name)) (agent-of-call all tool_input))
+                           ai (when run (agent-info all run))
+                           resp (tool-response tool_result)]
+                       (cond-> (assoc base
+                                      "tool_name" (claude-name tool_name)
+                                      "tool_input" (cond-> (tool-input tool_input)
+                                                     ai (assoc "subagent_type" (:type ai) "model" (:model ai) "effort" (:effort ai) "calls" (:calls ai) "duration_ms" (:ms ai)))
+                                      "tool_response" (if (and run (string? resp)) (str resp "\nagentId: " (short-id run)) resp))
+                         error (assoc "error" error)
+                         (or cm (:model ai) model) (assoc "model" (or cm (:model ai) model))
+                         usage (assoc "usage" usage)
+                         duration-ms (assoc "duration_ms" duration-ms)))
+             "stop" (let [{:keys [reply usage] smodel :model} (when (= "Stop" hook_event_name) (if es (turn-facts (scoped es)) (stop-facts in)))]
+                      (cond-> base
+                        reply (assoc "last_assistant_message" reply)
+                        (or smodel model) (assoc "model" (or smodel model))
+                        usage (assoc "usage" usage)))
+             "subagent-start" (let [ai (some-> (or es (await-agent in agent_id)) (agent-info agent_id))]
+                                (cond-> base
+                                  (:brief ai) (assoc "brief" (:brief ai))
+                                  (:model ai) (assoc "model" (:model ai))
+                                  (:effort ai) (assoc "effort" (:effort ai))))
+             "subagent-stop" (let [mine (some-> all (scoped agent_id))
+                                    ai (some-> all (agent-info agent_id))
+                                    us (keep #(when (= "session.usage_record" (get % "type")) (get-in % ["data" "usage"])) mine)]
+                                (cond-> (assoc base "last_assistant_message" (get in "last_assistant_message"))
+                                  (:model ai) (assoc "model" (:model ai))
+                                  (seq us) (assoc "usage" (usage-of us))))) ])))))
 
 (defn -main [& _]
   (let [raw (slurp *in*)
