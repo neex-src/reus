@@ -554,9 +554,10 @@
 (defn- payload-turn
   "Model and usage a payload brings itself when there is no transcript to read them from (moot
   records a deepseek exchange that way); usage has the transcript's key names."
-  [{:strs [model usage transcript_path]}]
-  (when (and (nil? transcript_path) (or model usage))
-    {:model model :usage (update-keys (or usage {}) keyword)}))
+  [{:strs [model usage duration_ms transcript_path]}]
+  (when (and (nil? transcript_path) (or model usage duration_ms))
+    (cond-> {:model model :usage (update-keys (or usage {}) keyword)}
+      duration_ms (assoc :duration-ms duration_ms))))
 
 ;; --- events ---------------------------------------------------------------------------------
 

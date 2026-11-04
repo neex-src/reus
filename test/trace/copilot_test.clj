@@ -51,12 +51,17 @@
     (sh proj "git" "add" ".")
     (sh proj "git" "-c" "user.name=t" "-c" "user.email=t@t" "commit" "-q" "-m" "init")
     (fs/create-dirs (fs/parent events))
-    (spit events (sub (slurp (str (fs/path dir "events.jsonl")))))
-    (doseq [line payloads]
-      (effect proj (json/parse-string line))
-      (p/shell {:in line :out :string :err :string
-                :extra-env {"TRACE_REPO" repo "TRACE_SEEN" (str (fs/path scratch "seen")) "COPILOT_HOME" home}}
-               "bb" "--config" (str (fs/path code "bb.edn")) "-m" "trace.copilot"))
+    ;; the log as Copilot had written it when it ran hook k: up to that hook's hook.start
+    (let [log (str/split-lines (sub (slurp (str (fs/path dir "events.jsonl")))))
+          starts (vec (keep-indexed #(when (str/starts-with? %2 "{\"type\":\"hook.start\"") %1) log))]
+      (is (= (count starts) (count payloads)))
+      (doseq [[k line] (map-indexed vector payloads)]
+        (spit events (str (str/join "\n" (take (inc (nth starts k)) log)) "\n"))
+        (effect proj (json/parse-string line))
+        (p/shell {:in line :out :string :err :string
+                  :extra-env {"TRACE_REPO" repo "TRACE_SEEN" (str (fs/path base "seen")) "COPILOT_HOME" home}}
+                 "bb" "--config" (str (fs/path code "bb.edn")) "-m" "trace.copilot"))
+      (spit events (str (str/join "\n" log) "\n")))
     (loop [n 0]
       (when (and (seq (files/entries (files/spool-dir repo))) (< n 300)) (Thread/sleep 50) (recur (inc n))))
     [repo "proj" (str "proj/s/" (subs sid 0 8))]))
@@ -85,7 +90,12 @@
         (testing "the failed edit carries its error, every call its model, the response its answer and tokens"
           (is (str/includes? (trailer (str b "~4") "Error") "ENOENT"))
           (is (= "claude-haiku-5-5" (trailer (str b "~2") "Model")))
-          (is (= "21412" (trailer b "Tokens-In")))
+          (is (= "8" (trailer b "Tokens-In")) "the uncached part; 13866 read and 7538 written are the cache")
+          (is (= "13866" (trailer b "Cache-Read")))
+          (testing "a call has the tokens of the model request that asked for it (the first call of a request only) and its time"
+            (is (= "218" (trailer (str b "~3") "Tokens-Out")))
+            (is (nil? (trailer (str b "~4") "Tokens-Out")))
+            (is (< 0 (parse-long (trailer (str b "~3") "Duration-Ms")) 5000)))
           (is (str/starts-with? (git "show" (str b ":.claude-trace/reply.md")) "Done. I created `hello.txt`")))
         (testing "the original payload is kept in the event note"
           (is (str/includes? (git "notes" "--ref=event" "show" (str b "~1")) "text_result_for_llm")))
