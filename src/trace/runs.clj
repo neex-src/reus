@@ -163,7 +163,8 @@ table.arms th, table.arms td { padding: 7px 10px; border-bottom: 1px solid var(-
 table.arms th:first-child, table.arms td:first-child { text-align: left; }
 table.arms th { font-size: 12px; color: var(--muted); font-weight: 600; }
 table.arms tr.older td { color: var(--muted); }
-table.delta td { font-variant-numeric: tabular-nums; }
+table.delta td, table.delta th { font-variant-numeric: tabular-nums; white-space: normal; padding: 7px 6px; }
+table.delta td small { font-size: 11px; }
 .pass { color: #2c7a3f; font-weight: 600; } .failx { color: #c0392b; font-weight: 600; }
 .good { color: #2c7a3f; } .bad { color: #c0392b; } .flat { color: var(--muted); }
 @media (prefers-color-scheme: dark) { :root:not([data-theme=light]) .pass, :root:not([data-theme=light]) .good { color: #7fd08f; } :root:not([data-theme=light]) .failx, :root:not([data-theme=light]) .bad { color: #ee6b5b; } }
@@ -401,7 +402,9 @@ summary { cursor: pointer; }
          (for [a arms :when (not (:base? a)) :let [f (flat (:total a))]]
            [:tr [:td [:b (:label a)]]
             (for [[k _ better] cols]
-              [:td {:class (delta-class k (get f k) (get bf k) better)} (or (delta-text k (get f k) (get bf k)) "–")])])]]))))
+              [:td {:class (delta-class k (get f k) (get bf k) better)} (if-let [t (delta-text k (get f k) (get bf k))]
+                (if-let [i (str/index-of t " (")] (list (subs t 0 i) " " [:small (subs t (inc i))]) t)
+                "–")])])]]))))
 
 (defn- whole-change
   "[stat-line diff] of the whole run: the first prompt's start tree to the last commit."
