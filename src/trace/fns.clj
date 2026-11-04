@@ -14,7 +14,8 @@
   Tree. Every Clojure file (.clj .cljs .cljc .bb) of the trace commit is a dir of its top-level
   definitions, one blob per name with the form's text: src/trace/record.clj/on-tool, .../ns, `area
   :circle` for a defmethod, `x~2` for a second def of x (a `/` in a name is `%2F`). Other forms
-  are left out. A file rewrite-clj cannot parse is cut where a line starts with `(`.
+  are left out. A file rewrite-clj cannot parse is cut where a line starts with `(`. (All of that, the
+  diffs and the changed definitions are ashamer's, see trace.ash: loaded at run time, not a dependency.)
 
   Commits, only where a definition changed. Parent 1: the previous fn commit of the line (a project's
   first one has an empty root, `fn layer of <project>`). Parent 2: the trace commit (the tool call, its
@@ -37,15 +38,12 @@
             [babashka.process :as p]
             [clojure.java.io :as io]
             [clojure.string :as str]
-            [rewrite-clj.node :as n]
-            [rewrite-clj.parser :as parser]
+            [trace.ash :as ash]
             [trace.files :as files]
             [trace.git :as g :refer [git!]]
             [trace.health :as health]
             [trace.store :as store]))
 
-(def pathspec ["*.clj" "*.cljs" "*.cljc" "*.bb"])
-(def max-bytes "A bigger file is no definitions (generated code)." (* 1024 1024))
 (def batch-over "More new trace commits than this go through fast-import." 200)
 (def max-trailers 30)
 (def zero "0000000000000000000000000000000000000000")
@@ -53,57 +51,12 @@
 
 (defn- lines [s] (remove str/blank? (str/split-lines (str s))))
 
-;; --- definitions ------------------------------------------------------------------------
-
-(defn- form-name
-  "What a top-level form defines from its first words: `ns`, the name of a def-like form (a head
-  whose name starts with def), a defmethod's with its dispatch value; else nil."
-  [head nm dispatch]
-  (let [local (str/replace (str head) #"^.*/" "")]
-    (cond (= head "ns") "ns"
-          (and nm (str/starts-with? local "def"))
-          (str nm (when (= local "defmethod") (some->> dispatch (str " ")))))))
-
-(defn- unmeta [nd]
-  (if (#{:meta :meta*} (n/tag nd)) (recur (last (remove n/whitespace-or-comment? (n/children nd)))) nd))
-
-(defn- node-name [nd]
-  (when (= :list (n/tag nd))
-    (let [[h nm d] (map unmeta (remove n/whitespace-or-comment? (n/children nd)))]
-      (when (and h (= :token (n/tag h)))
-        (form-name (n/string h) (some-> nm n/string) (some-> d n/string))))))
-
-(defn- parsed [s]
-  (try (doall (keep #(when-let [nm (node-name %)] [nm (n/string %)]) (n/children (parser/parse-string-all s))))
-       (catch Exception _ nil)))
-
-(defn- by-lines
-  "The forms of a file that does not parse: one starts at each line that starts with `(`."
-  [s]
-  (let [ls (vec (str/split-lines s))
-        starts (keep-indexed (fn [i l] (when (str/starts-with? l "(") i)) ls)]
-    (keep (fn [[a b]]
-            (let [text (str/join "\n" (reverse (drop-while #(re-matches #"\s*(;.*)?" %) (rseq (subvec ls a b)))))
-                  [_ h nm d] (re-find #"^\((\S+)\s+(?:\^\S+\s+)*([^\s()\[\]{}\"]+)(?:\s+([^\s()\[\]{}\"]+))?" text)]
-              (when-let [nm (form-name h nm d)] [nm text])))
-          (partition 2 1 (concat starts [(count ls)])))))
-
-(defn- entry-name [nm]
-  (let [s (str/replace (str/trim (str/replace nm #"\s+" " ")) "/" "%2F")
-        s (if (> (count s) 120) (subs s 0 120) s)]
-    (if (#{"" "." ".."} s) (str "%" s) s)))
+;; --- definitions: ashamer's (see trace.ash) ----------------------------------------------------------
 
 (defn explode
-  "{name text} of the top-level definitions of Clojure source s (see ns)."
+  "{name text} of the top-level definitions of Clojure source s (ashamer.fns/explode)."
   [s]
-  (if (> (count s) max-bytes)
-    {}
-    (loop [[[nm text] & more :as forms] (or (parsed s) (by-lines s)) seen {} out {}]
-      (if (empty? forms)
-        out
-        (let [k (entry-name nm)
-              i (inc (seen k 0))]
-          (recur more (assoc seen k i) (assoc out (if (= i 1) k (str k "~" i)) (str text "\n"))))))))
+  ((ash/f 'ashamer.fns/explode) s))
 
 ;; --- the trace side -----------------------------------------------------------------------
 
@@ -135,30 +88,16 @@
        :main? (or (not (str/blank? real)) (str/blank? ps))})))
 
 (defn- diffs
-  "{sha [[old-blob new-blob path]...]} of the Clojure files each commit changed against its first parent."
+  "{sha [[old-blob new-blob path]...]} of the Clojure files each commit changed against its first parent
+  (ashamer.git/diffs, in the trace repo)."
   [commits]
-  (let [out (apply git! "-c" "core.quotePath=false" "diff-tree" "--stdin" "-r" "--root" "--no-renames"
-                   (concat ["--"] pathspec
-                           [{:in (str/join (map (fn [{:keys [sha parents]}] (str sha (some->> (first parents) (str " ")) "\n")) commits))}]))]
-    (loop [[l & more] (str/split-lines out) cur nil acc {}]
-      (cond (nil? l) acc
-            (re-matches #"[0-9a-f]{40}" l) (recur more l acc)
-            (not (str/starts-with? l ":")) (recur more cur acc)
-            :else (let [[meta path] (str/split l #"\t" 2)
-                        [om nm o nw] (str/split (subs meta 1) #" ")]
-                    (recur more cur (if (and cur (every? #{"100644" "100755" "000000"} [om nm]) (not (str/starts-with? path "\"")))
-                                      (update acc cur (fnil conj []) [o nw path])
-                                      acc)))))))
+  (ash/in-repo g/*repo* #((ash/f 'ashamer.git/diffs) commits)))
 
 (defn- changes
   "[[fn-path kind text-or-nil]] of the definitions that differ between the old and new version of each
   file; defs: blob sha -> {name text}."
   [entries defs]
-  (for [[old new path] entries
-        :let [a (defs old) b (defs new)]
-        nm (sort (distinct (concat (keys a) (keys b))))
-        :when (not= (a nm) (b nm))]
-    [(str path "/" nm) (cond (nil? (a nm)) :added (nil? (b nm)) :removed :else :changed) (b nm)]))
+  ((ash/f 'ashamer.fns/changes) (for [[old new path] entries] [path (defs old) (defs new)])))
 
 (defn- message
   "Subject and body of a fn commit with changes ch for trace commit c."
@@ -203,11 +142,7 @@
 (defn- clj-files
   "{path blob} of the Clojure files of a commit's tree (as diffs sees them)."
   [rev]
-  (into {} (keep #(let [[meta path] (str/split % #"\t" 2) [mode _ sha] (str/split meta #" ")]
-                    (when (and (#{"100644" "100755"} mode) (re-find #"\.(clj|cljs|cljc|bb)$" path)
-                               (not (re-find #"[\"\\\u0000-\u001f\u007f]" path)))
-                      [path sha]))
-                 (remove str/blank? (str/split (git! "ls-tree" "-r" "-z" rev) #"\u0000")))))
+  (ash/in-repo g/*repo* #((ash/f 'ashamer.git/clj-files) rev)))
 
 (defn- between
   "Diff entries [[old new path]] from one {path blob} to another."
@@ -318,6 +253,7 @@
   "Catch the fn layer of repo up with its trace, again while the trace moved meanwhile:
   {:commits :made}; nil when another run holds the lock."
   [repo]
+  (ash/load!)
   (binding [g/*repo* (str repo)]
     (files/try-file-lock (lock-file repo)
                          #(do (fs/create-dirs (state-dir repo))
@@ -328,7 +264,7 @@
 (defn wake!
   "Start a catch-up of repo, detached, unless one is running (the worker calls this when idle)."
   [repo]
-  (when (files/try-file-lock (lock-file repo) (constantly true))
+  (when (and (ash/available?) (files/try-file-lock (lock-file repo) (constantly true)))
     (let [log (io/file (str (fs/path repo ".git" "trace-worker.log")))]
       (p/process {:in "" :out :append :out-file log :err :append :err-file log
                   :dir (str repo) :extra-env {"TRACE_REPO" (str repo)}}
@@ -346,6 +282,9 @@
             (println (if r (str (:commits r) " trace commits looked at, " (:made r) " fn commits made")
                          "a catch-up is running already"))))
         (catch Throwable e
+          (when (ash/missing? e) ; not a failure of the layer: the sandbox has no ashamer
+            (binding [*out* *err*] (println (ex-message e)))
+            (System/exit 1))
           (health/log! "fns" "" {} e)
           (health/fail! :fns "" {} e)
           (when-not (some #{"--quiet"} args) (binding [*out* *err*] (println "fns failed:" (ex-message e))))
