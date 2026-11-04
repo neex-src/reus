@@ -56,14 +56,34 @@
              :requires ([trace.e2e])
              :task (apply trace.e2e/-main *command-line-args*)}
 
+  runs:go {:doc "Run the same prompts on several models/efforts and compare: bb runs:go --task N --prompts DIR|FILE [--start DIR] [--check CMD] --arm [name=]MODEL[:EFFORT] ... [--serial]"
+           :requires ([trace.runner])
+           :task (apply trace.runner/-main *command-line-args*)}
+
+  runs:new {:doc "The same, asking for each thing (the wizard)"
+            :requires ([trace.runner])
+            :task (trace.runner/new-main)}
+
+  runs:html {:doc "A comparison as one static HTML file: bb runs:html TASK [FILE]  (default var/reports/TASK.html)"
+             :requires ([trace.runner])
+             :task (apply trace.runner/html-main *command-line-args*)}
+
+  copilot:install {:doc "Put reus into Copilot (its home, ~/.copilot or $COPILOT_HOME): the hooks that record every session, and /reus-compare"
+                   :requires ([trace.copilot-install])
+                   :task (trace.copilot-install/install!)}
+
+  copilot:uninstall {:doc "Take reus out of Copilot's home again (the traces stay)"
+                     :requires ([trace.copilot-install])
+                     :task (trace.copilot-install/uninstall!)}
+
   trace:test {:doc "Test the trace recorder"
               :requires ([clojure.test :as t] [trace.record-test])
               :task (let [{:keys [fail error]} (t/run-tests 'trace.record-test)]
                       (System/exit (if (zero? (+ fail error)) 0 1)))}
 
   test {:doc "Every test of this repo (the shell.js one needs node)"
-        :requires ([clojure.test :as t] [trace.record-test] [trace.hook-test] [trace.replay-test] [trace.probe-test] [trace.store-test] [trace.turn-test] [trace.ignore-test] [trace.gui-test] [trace.fns-test] [trace.mirror-test] [trace.copilot-test] [trace.runs-test] [jsonl.read-test])
-        :task (let [{:keys [fail error]} (t/run-tests 'trace.record-test 'trace.hook-test 'trace.replay-test 'trace.probe-test 'trace.store-test 'trace.turn-test 'trace.ignore-test 'trace.gui-test 'trace.fns-test 'trace.mirror-test 'trace.copilot-test 'trace.runs-test 'jsonl.read-test)
+        :requires ([clojure.test :as t] [trace.record-test] [trace.hook-test] [trace.replay-test] [trace.probe-test] [trace.store-test] [trace.turn-test] [trace.ignore-test] [trace.gui-test] [trace.fns-test] [trace.mirror-test] [trace.copilot-test] [trace.runs-test] [trace.runner-test] [jsonl.read-test])
+        :task (let [{:keys [fail error]} (t/run-tests 'trace.record-test 'trace.hook-test 'trace.replay-test 'trace.probe-test 'trace.store-test 'trace.turn-test 'trace.ignore-test 'trace.gui-test 'trace.fns-test 'trace.mirror-test 'trace.copilot-test 'trace.runs-test 'trace.runner-test 'jsonl.read-test)
                     js (:exit (shell {:continue true} "node test/trace/shell_test.js"))]
                 (System/exit (if (and (zero? (+ fail error)) (zero? js)) 0 1)))}
 

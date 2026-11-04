@@ -67,4 +67,21 @@
           (is (str/includes? body "t--cheap")) ; the open-in-trace link names the project
           (is (str/includes? body "✓"))
           (is (str/includes? body "✗")))
-        (is (= 404 (:status (runs/route "/runs/nope"))))))))
+        (is (= 404 (:status (runs/route "/runs/nope")))))
+      (testing "a second run of an arm: both are listed, the newest is shown, ?pick= shows the older"
+        (let [d (str (fs/path scratch "t--cheap"))]
+          (rec/handle! "prompt" {"session_id" "cccccccc-2" "cwd" d "prompt" "again" "hook_event_name" "UserPromptSubmit"})
+          (rec/handle! "stop" {"session_id" "cccccccc-2" "cwd" d "hook_event_name" "Stop" "last_assistant_message" "second"}))
+        (let [tips (r/tips)
+              {:keys [all shown]} (runs/task-runs tips "t" #{})
+              cheap (fn [rs] (filter #(= "cheap" (:arm %)) rs))]
+          (is (= 3 (count all)))
+          (is (= 2 (count shown)) "one run per arm")
+          (is (= "cccccccc" (:sid8 (first (cheap shown)))) "the newest")
+          (is (= "aaaaaaaa" (:sid8 (first (cheap (:shown (runs/task-runs tips "t" #{"cheap:aaaaaaaa"})))))) "or the one picked"))
+        (is (str/includes? (:body (runs/route "/runs/t" {})) "show"))
+        (testing "the static report: one file, no script, no address"
+          (let [html (runs/static-html "t")]
+            (is (str/includes? html "✓"))
+            (is (not (str/includes? html "<script")))
+            (is (not (re-find #"https?://" html)))))))))

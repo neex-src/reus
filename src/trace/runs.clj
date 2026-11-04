@@ -63,16 +63,15 @@
   (reduce (fn [m p] (if-let [[_ t a] (re-matches #"(.+?)--(.+)" p)] (assoc-in m [t a] p) m))
           (sorted-map) (r/mains tips)))
 
-(defn- session-of
-  "The session of a project with the most prompts (the newest on a tie): its prompt ids."
+(defn sessions-of
+  "The sessions of a project, oldest first: [{:sid8 :ids}] (an agent run is not a session of the arm)."
   [tips project]
-  (let [ids (vec (remove #(str/includes? (first (str/split % #"@")) "-") ; an agent run is not the arm's session
-                         (r/prompt-nos tips project)))] ; oldest first
+  (let [ids (vec (remove #(str/includes? (first (str/split % #"@")) "-") (r/prompt-nos tips project)))] ; oldest first
     (->> ids
          (group-by #(first (str/split % #"@")))
-         vals
-         (sort-by (juxt count #(.indexOf ^java.util.List ids (last %))))
-         last)))
+         (map (fn [[sid8 is]] {:sid8 sid8 :ids (vec is)}))
+         (sort-by #(.indexOf ^java.util.List ids (first (:ids %))))
+         vec)))
 
 (defn- step-failed? [s] (boolean (:err s)))
 
@@ -90,14 +89,15 @@
      :turn (:turn-end d) :cost (cost (:turn-end d))}))
 
 (defn arm-data
-  "{:arm :project :ids :prompts [{:d prompt-data :m metrics}] :total metrics-sum :tip :session}, nil for a project with no session."
-  [tips arm project]
-  (when-let [ids (seq (session-of tips project))]
+  "One run of an arm: {:arm :project :sid8 :at :ids :prompts [{:d prompt-data :m metrics}] :total metrics-sum :tip :session}
+  for the session sid8 of the project (default: its newest), nil when it has none."
+  [tips arm project & [sid8]]
+  (when-let [{:keys [ids]} (let [ss (sessions-of tips project)] (if sid8 (first (filter #(= sid8 (:sid8 %)) ss)) (peek ss)))]
     (let [ps (mapv (fn [id] (let [d (r/prompt-data tips project id)] {:id id :d d :m (prompt-metrics d)})) ids)
           ms (map :m ps)
           turns (keep :turn ms)
           costs (keep :cost ms)]
-      {:arm arm :project project :ids ids :prompts ps
+      {:arm arm :project project :ids ids :sid8 (first (str/split (first ids) #"@")) :at (:t0 (:d (first ps))) :prompts ps
        :tip (:tip (:d (peek ps))) :session (:session (:d (first ps)))
        :total {:calls (reduce + (map :calls ms)) :edits (reduce + (map :edits ms)) :failed (reduce + (map :failed ms))
                :add (reduce + (map :add ms)) :del (reduce + (map :del ms))
@@ -147,9 +147,10 @@ table.arms { border-collapse: collapse; font-size: 14px; background: var(--panel
 table.arms th, table.arms td { padding: 7px 10px; border-bottom: 1px solid var(--line); text-align: right; white-space: nowrap; }
 table.arms th:first-child, table.arms td:first-child { text-align: left; }
 table.arms th { font-size: 12px; color: var(--muted); font-weight: 600; }
+table.arms tr.older td { color: var(--muted); }
 .pass { color: #2c7a3f; font-weight: 600; } .failx { color: #c0392b; font-weight: 600; }
 @media (prefers-color-scheme: dark) { :root:not([data-theme=light]) .pass { color: #7fd08f; } :root:not([data-theme=light]) .failx { color: #ee6b5b; } }
-.ptext { background: var(--sunk); padding: 8px 12px; border-radius: 6px; margin: 6px 0 10px; }
+.ptext { background: var(--sunk); padding: 8px 12px; border-radius: 6px; margin: 6px 0 10px; white-space: pre-wrap; }
 .cols { display: grid; grid-template-columns: repeat(var(--n), minmax(0, 1fr)); gap: 12px; align-items: start; }
 .col { border: 1px solid var(--line); border-radius: 6px; padding: 8px 10px; background: var(--panel); min-width: 0; }
 .col h3 { margin: 0 0 4px; font-size: 14px; }
@@ -161,13 +162,23 @@ ol.calls li.flat { cursor: default; padding-left: 14px; }
 .chip { display: inline-block; min-width: 38px; text-align: center; font-size: 10px; padding: 0 5px; border-radius: 8px; margin-right: 6px; background: var(--sunk); color: var(--muted); }
 .chip.edit { background: #dff3e3; color: #1d5a2c; } .chip.run { background: #e3ecfa; color: #1f4a8a; } .chip.err { background: #fbe0dc; color: #8e2a1d; }
 .add { color: #2c7a3f; } .del { color: #c0392b; }
-.reply { margin-top: 6px; font-size: 13px; }
-.reply pre { white-space: pre-wrap; margin: 4px 0; }
-pre.checkout { white-space: pre-wrap; font-size: 12px; max-height: 320px; overflow: auto; }
+.rr { margin-top: 6px; font-size: 13px; }
+.rr pre { white-space: pre-wrap; margin: 4px 0; }
+pre.checkout, pre.body { white-space: pre-wrap; font: 12px/1.4 var(--mono); max-height: 360px; overflow: auto; background: var(--sunk); padding: 6px 8px; border-radius: 4px; margin: 4px 0; }
+pre.body .a { color: #2c7a3f; } pre.body .d { color: #c0392b; } pre.body .h { color: var(--muted); }
+a.toggle { font-size: 12px; margin-left: 6px; }
 @media (max-width: 900px) { .cols { grid-template-columns: 1fr; } }
 ")
 
-(defn- page [title body]
+(def ^:private static-css "
+:root { --panel: #fff; --sunk: #f3f4f6; --line: #dcdfe4; --muted: #6b7280; --bg: #fff; --fg: #1c1e21; --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+@media (prefers-color-scheme: dark) { :root { --panel: #1b1e23; --sunk: #23272e; --line: #333842; --muted: #9aa3af; --bg: #14161a; --fg: #e6e8eb; } }
+body { margin: 0; background: var(--bg); color: var(--fg); font: 15px/1.45 system-ui, -apple-system, 'Segoe UI', sans-serif; }
+code { font-family: var(--mono); font-size: 0.92em; }
+summary { cursor: pointer; }
+")
+
+(defn- page [title body & {:keys [static?]}]
   (str "<!doctype html>"
        (h/html
         [:html {:lang "en"}
@@ -175,20 +186,36 @@ pre.checkout { white-space: pre-wrap; font-size: 12px; max-height: 320px; overfl
           [:meta {:charset "utf-8"}]
           [:meta {:name "viewport" :content "width=device-width, initial-scale=1"}]
           [:title title]
-          [:link {:rel "stylesheet" :href "https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;600&display=swap"}]
-          [:link {:rel "stylesheet" :href "/static/app.css"}]
-          [:style (h/raw css)]
-          [:script {:src "https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"}]]
-         [:body {:data-watch "{}"}
-          [:header.top
-           [:a.brand {:href "/"} "reus trace"]
-           [:nav [:a {:href "/"} "Prompts"] [:a {:href "/mirrors"} "Mirrors"] [:a.on {:href "/runs"} "Runs"]]]
-          body
-          [:script {:src "/static/shell.js"}]
-          [:script {:src "/static/app.js"}]]])))
+          (if static?
+            [:style (h/raw (str static-css css))]
+            (list
+             [:link {:rel "stylesheet" :href "https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;600&display=swap"}]
+             [:link {:rel "stylesheet" :href "/static/app.css"}]
+             [:style (h/raw css)]
+             [:script {:src "https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"}]))]
+         (if static?
+           [:body body]
+           [:body {:data-watch "{}"}
+            [:header.top
+             [:a.brand {:href "/"} "reus trace"]
+             [:nav [:a {:href "/"} "Prompts"] [:a {:href "/mirrors"} "Mirrors"] [:a.on {:href "/runs"} "Runs"]]]
+            body
+            [:script {:src "/static/shell.js"}]
+            [:script {:src "/static/app.js"}]])])))
 
 (defn- lazy [title src kind]
   [:details {:class "lazy" :data-src src :data-kind kind} [:summary title] [:div.lazy-body [:div.loading "loading…"]]])
+
+(defn- clipped [s n] (let [s (str s)] (if (> (count s) n) (str (subs s 0 n) "\n… " (- (count s) n) " more characters") s)))
+
+(defn- diff-pre [text n]
+  [:pre.body (for [l (str/split-lines (clipped text n))]
+               [:span {:class (cond (str/starts-with? l "+++") "h" (str/starts-with? l "---") "h" (str/starts-with? l "@@") "h"
+                                    (str/starts-with? l "diff ") "h" (str/starts-with? l "index ") "h"
+                                    (str/starts-with? l "+") "a" (str/starts-with? l "-") "d" :else "")}
+                (str l "\n")])])
+
+(def ^:private not-trace [":(exclude).claude-trace"])
 
 (defn- step-label [{:keys [call cmd kind files subject]}]
   (let [{:keys [tool input code]} call
@@ -198,15 +225,21 @@ pre.checkout { white-space: pre-wrap; font-size: 12px; max-height: 320px; overfl
           (seq files) (str/join ", " (map :path files))
           :else (clip (or cmd subject) 120))))
 
-(defn- step-li [s]
+(defn- step-li [s static?]
   (let [cls (cond (:err s) "err" (= :edit (:kind s)) "edit" (= :run (:kind s)) "run" :else "")
         head (list [:span {:class (str "chip " cls)} (cond (:err s) "failed" :else (name (:kind s)))]
                    (clip (step-label s) 150)
                    (when (or (pos? (:add s 0)) (pos? (:del s 0))) (list " " [:span.add (str "+" (:add s))] " " [:span.del (str "−" (:del s))]))
                    (when-let [ms (get-in s [:trailers "Duration-Ms"])] [:small {:style "color:var(--muted)"} (str "  " ms " ms")]))]
     [:li
-     (cond (seq (:files s)) [:details {:class "lazy" :data-src (str "/x/diff?c=" (:sha s)) :data-kind "diff"} [:summary head] [:div.lazy-body [:div.loading "loading…"]]]
-           (:result s) [:details {:class "lazy" :data-src (str "/x/show?r=" (:result s)) :data-kind "text"} [:summary head] [:div.lazy-body [:div.loading "loading…"]]]
+     (cond (seq (:files s))
+           (if static?
+             [:details [:summary head] (diff-pre (apply git "show" "--format=" "--patch" (:sha s) "--" "." not-trace) 12000)]
+             [:details {:class "lazy" :data-src (str "/x/diff?c=" (:sha s)) :data-kind "diff"} [:summary head] [:div.lazy-body [:div.loading "loading…"]]])
+           (:result s)
+           (if static?
+             [:details [:summary head] [:pre.body (clipped (git "cat-file" "-p" (:result s)) 4000)]]
+             [:details {:class "lazy" :data-src (str "/x/show?r=" (:result s)) :data-kind "text"} [:summary head] [:div.lazy-body [:div.loading "loading…"]]])
            :else [:div.flat.flat head])]))
 
 (defn- nums-line [m]
@@ -217,64 +250,113 @@ pre.checkout { white-space: pre-wrap; font-size: 12px; max-height: 320px; overfl
               " · cache " (thou (:cache_read_input_tokens u))))
        (when (:cost m) (str " · " (usd (:cost m))))))
 
-(defn- summary-table [arms]
-  (let [units? (some #(pos? (or (get-in % [:total :usage :copilot_cost]) 0)) arms)]
-  [:table.arms
-   [:thead [:tr [:th "arm"] [:th "end state"] [:th "calls"] [:th "edits"] [:th "failed"] [:th "lines"] [:th "time"]
-            [:th "input"] [:th "output"] [:th "thinking"] [:th "cache read"] [:th "cost"] (when units? [:th "Copilot units"])]]
-   [:tbody
-    (for [{:keys [arm total check] :as a} arms
-          :let [u (:usage total)]]
-      [:tr
-       [:td [:b arm]]
-       [:td (cond (nil? check) "–"
-                  (zero? (:exit check)) [:span.pass (str "✓ " (or (:pass check) "") " pass")]
-                  :else [:span.failx (str "✗ " (or (:fail check) "?") " fail")])]
-       [:td (:calls total)] [:td (:edits total)] [:td (:failed total)]
-       [:td [:span.add (str "+" (:add total))] " " [:span.del (str "−" (:del total))]]
-       [:td (secs (:secs total))]
-       [:td (thou (:input_tokens u))] [:td (thou (:output_tokens u))] [:td (thou (:reasoning_tokens u))]
-       [:td (thou (:cache_read_input_tokens u))]
-       [:td (usd (:cost total))]
-       (when units? [:td (:copilot_cost u)])])]]))
+;; --- the runs of a task ------------------------------------------------------------------------
 
-(defn- task-page [tips task]
-  (let [arms (->> (get (tasks tips) task)
-                  (keep (fn [[arm project]] (when-let [a (arm-data tips arm project)]
-                                              (assoc a :check (check (:tip a))))))
-                  (sort-by :arm) vec)
+(defn- stamp [secs] (when secs (.format (java.time.format.DateTimeFormatter/ofPattern "MMM d, HH:mm") (.atZone (java.time.Instant/ofEpochSecond secs) (java.time.ZoneId/systemDefault)))))
+
+(defn task-runs
+  "{:all [run ...] :shown [run ...]} of a task: every session of every arm is a run (arm-data + :check), oldest
+  first within an arm. pick: a set of \"arm:sid8\"; the runs shown are those picked, and for an arm with none
+  picked its newest."
+  [tips task pick]
+  (let [all (vec (for [[arm project] (get (tasks tips) task)
+                       {:keys [sid8]} (sessions-of tips project)
+                       :let [a (arm-data tips arm project sid8)] :when a]
+                   (assoc a :check (check (:tip a)))))
+        by-arm (group-by :arm all)
+        shown (vec (mapcat (fn [[_ runs*]]
+                             (or (seq (filter #(contains? pick (str (:arm %) ":" (:sid8 %))) runs*)) [(peek (vec runs*))]))
+                           (sort-by key by-arm)))]
+    {:all all :shown shown}))
+
+(defn- run-id [a] (str (:arm a) ":" (:sid8 a)))
+
+(defn- labelled
+  "The shown runs with a :label: the arm, plus the time when an arm is shown twice."
+  [shown]
+  (let [n (frequencies (map :arm shown))]
+    (mapv #(assoc % :label (if (> (n (:arm %)) 1) (str (:arm %) " · " (stamp (:at %))) (:arm %))) shown)))
+
+(defn- summary-table [all shown {:keys [static? task]}]
+  (let [units? (some #(pos? (or (get-in % [:total :usage :copilot_cost]) 0)) all)
+        shown-ids (set (map run-id shown))
+        multi? (> (count all) (count (distinct (map :arm all))))
+        pick-href (fn [a] (let [now (if (shown-ids (run-id a)) (disj shown-ids (run-id a)) (conj shown-ids (run-id a)))]
+                            (str "/runs/" (enc task) "?pick=" (enc (str/join "," (sort now))))))]
+    [:table.arms
+     [:thead [:tr [:th "run"] [:th "end state"] [:th "calls"] [:th "edits"] [:th "failed"] [:th "lines"] [:th "time"]
+              [:th "input"] [:th "output"] [:th "thinking"] [:th "cache read"] [:th "cost"] (when units? [:th "Copilot units"])]]
+     [:tbody
+      (for [{:keys [arm total check] :as a} all
+            :let [u (:usage total) on? (shown-ids (run-id a))]]
+        [:tr {:class (when-not on? "older")}
+         [:td [:b arm] (when multi? [:small " " (stamp (:at a))])
+          (when (and multi? (not static?)) [:a.toggle {:href (pick-href a)} (if on? "shown · hide" "show")])]
+         [:td (cond (nil? check) "–"
+                    (zero? (:exit check)) [:span.pass (str "✓ " (or (:pass check) "") " pass")]
+                    :else [:span.failx (str "✗ " (or (:fail check) "?") " fail")])]
+         [:td (:calls total)] [:td (:edits total)] [:td (:failed total)]
+         [:td [:span.add (str "+" (:add total))] " " [:span.del (str "−" (:del total))]]
+         [:td (secs (:secs total))]
+         [:td (thou (:input_tokens u))] [:td (thou (:output_tokens u))] [:td (thou (:reasoning_tokens u))]
+         [:td (thou (:cache_read_input_tokens u))]
+         [:td (usd (:cost total))]
+         (when units? [:td (:copilot_cost u)])])]]))
+
+(defn- task-body [task all shown static?]
+  (let [arms (labelled shown)
         n (apply max 0 (map #(count (:prompts %)) arms))]
-    (page (str task " · runs")
-          [:main.runs-wrap
-           [:div.crumb [:a {:href "/runs"} "Runs"] " / " task]
-           [:h1 task]
-           (if (empty? arms)
-             [:p "No run of this task is recorded."]
-             (list
-              (summary-table arms)
-              [:p.crumb "Cost is list price of the tokens (input counts what was not cached). The check is the command in the final tree's "
-               [:code ".reus-check"] ", run on that tree."]
-              (for [a arms :when (:check a)]
-                [:details [:summary (str (:arm a) ": " (:cmd (:check a)) " → exit " (:exit (:check a)))]
-                 [:pre.checkout (:out (:check a))]])
-              (for [i (range n)
-                    :let [pd (some #(:d (nth (:prompts %) i nil)) arms)]]
-                [:section
-                 [:h2 (str "Prompt " (inc i))]
-                 [:div.ptext (:prompt pd)]
-                 [:div.cols {:style (str "--n:" (count arms))}
-                  (for [a arms :let [p (nth (:prompts a) i nil)]]
-                    [:div.col
-                     [:h3 (:arm a)
-                      (when p [:small " " [:a {:href (str "/p/" (enc (:id p)) "?m=" (enc (:project a)))} "open in trace"]])]
-                     (if-not p
-                       [:div.nums "not reached"]
-                       (let [{:keys [d m]} p]
-                         (list
-                          [:div.nums (nums-line m)]
-                          [:ol.calls (for [s (:steps d)] (step-li s))]
-                          (lazy "Net change of this prompt" (str "/x/net?m=" (enc (:project a)) "&p=" (enc (:id p))) "diff")
-                          [:details.reply [:summary "Reply"] [:pre (:reply d)]])))])]])))])))
+    [:main.runs-wrap
+     (if static?
+       [:div.crumb "reus · runs of the same task"]
+       [:div.crumb [:a {:href "/runs"} "Runs"] " / " task])
+     [:h1 task]
+     (if (empty? arms)
+       [:p "No run of this task is recorded."]
+       (list
+        (summary-table all shown {:static? static? :task task})
+        [:p.crumb "Cost is list price of the tokens (input counts what was not cached). The check is the command in the final tree's "
+         [:code ".reus-check"] ", run on that tree."
+         (when (> (count all) (count shown)) " Greyed rows are older runs of an arm; the columns below show the newest.")]
+        (for [a arms :when (:check a)]
+          [:details [:summary (str (:label a) ": " (:cmd (:check a)) " → exit " (:exit (:check a)))]
+           [:pre.checkout (:out (:check a))]])
+        (for [i (range n)
+              :let [pd (some #(:d (nth (:prompts %) i nil)) arms)]]
+          [:section
+           [:h2 (str "Prompt " (inc i))]
+           [:div.ptext (:prompt pd)]
+           [:div.cols {:style (str "--n:" (count arms))}
+            (for [a arms :let [p (nth (:prompts a) i nil)]]
+              [:div.col
+               [:h3 (:label a)
+                (when (and p (not static?)) [:small " " [:a {:href (str "/p/" (enc (:id p)) "?m=" (enc (:project a)))} "open in trace"]])]
+               (if-not p
+                 [:div.nums "not reached"]
+                 (let [{:keys [d m]} p]
+                   (list
+                    [:div.nums (nums-line m)]
+                    [:ol.calls (for [s (:steps d)] (step-li s static?))]
+                    (if static?
+                      [:details [:summary "Net change of this prompt"]
+                       (diff-pre (apply git "diff" (:fork d) (:end d) "--" "." not-trace) 40000)]
+                      (lazy "Net change of this prompt" (str "/x/net?m=" (enc (:project a)) "&p=" (enc (:id p))) "diff"))
+                    [:details.rr (when static? {:open true}) [:summary "Reply"] [:pre (:reply d)]])))])]])))]))
+
+(defn- pick-set [q] (set (remove str/blank? (str/split (str (get q "pick")) #","))))
+
+(defn- task-page [tips task q]
+  (let [{:keys [all shown]} (task-runs tips task (pick-set q))]
+    (page (str task " · runs") (task-body task all shown false))))
+
+(defn static-html
+  "The comparison of a task as ONE self-contained HTML file (inline css, every diff and output inline, no script,
+  no font or file from the net): the newest run of each arm in columns, all runs in the table. Reads the trace
+  repo g/*repo*."
+  [task]
+  (let [tips (r/tips)
+        {:keys [all shown]} (task-runs tips task #{})]
+    (page (str task " · runs") (task-body task all shown true) :static? true)))
 
 (defn- index-page [tips]
   (page "Runs"
@@ -289,11 +371,11 @@ pre.checkout { white-space: pre-wrap; font-size: 12px; max-height: 320px; overfl
            [:p "None yet."])]))
 
 (defn route
-  "The response for /runs or /runs/<task>, nil when the uri is not ours."
-  [uri]
+  "The response for /runs or /runs/<task>[?pick=arm:sid8,...], nil when the uri is not ours. q: the query params."
+  [uri & [q]]
   (let [html (fn [s] {:status 200 :headers {"content-type" "text/html; charset=utf-8" "cache-control" "no-store"} :body s})
         tips (r/tips)]
     (cond (= uri "/runs") (html (index-page tips))
           (re-matches #"/runs/[^/]+" uri)
           (let [t (java.net.URLDecoder/decode (subs uri 6) "UTF-8")]
-            (if (get (tasks tips) t) (html (task-page tips t)) {:status 404 :body "no such task"})))))
+            (if (get (tasks tips) t) (html (task-page tips t q)) {:status 404 :body "no such task"})))))
