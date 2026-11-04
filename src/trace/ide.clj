@@ -14,7 +14,7 @@
 
   Models: the id as the account lists it (`backgroundAgent/listModels`; Copilot plans often list only `auto`),
   or a part of it (`haiku`). A model the account does not list is run through a BYOK provider when
-  $ANTHROPIC_API_KEY is set (`haiku` = claude-haiku-5-5, `claude-*` as given): the plugin's own custom-endpoint
+  a key is there ($ANTHROPIC_API_KEY, else a gitignored file: see *key-files*) (`haiku` = claude-haiku-5-5, `claude-*` as given): the plugin's own custom-endpoint
   feature (Anthropic Messages API, no Copilot request is spent). The agent runs in autopilot mode with every
   permission request approved (what `copilot -p --allow-all-tools` does), so it ends each prompt with a
   `task_complete` call the CLI does not make."
@@ -46,7 +46,31 @@
               :when (fs/exists? (fs/path src f))]
         (fs/copy (fs/path src f) (fs/path dst f) {:replace-existing true})))))
 
-(defn byok-key [] (not-empty (or (System/getenv "REUS_IDE_BYOK_KEY") (System/getenv "ANTHROPIC_API_KEY"))))
+(def ^:dynamic *key-files*
+  "Where the BYOK key is looked for when no environment variable has it, in order: $REUS_IDE_BYOK_FILE, var/byok.env
+  of the main checkout (gitignored), ~/projects/copilot-lab/.env. KEY=value lines (`export ` and quotes allowed)."
+  nil)
+
+(defn- key-files []
+  (or *key-files*
+      (remove nil? [(System/getenv "REUS_IDE_BYOK_FILE")
+                    (str (fs/path (g/main-checkout) "var" "byok.env"))
+                    (str (fs/path (fs/home) "projects" "copilot-lab" ".env"))])))
+
+(defn- key-in-file
+  "The value of REUS_IDE_BYOK_KEY or ANTHROPIC_API_KEY in an env-style file, nil when the file or the line is not there."
+  [file]
+  (when (fs/regular-file? file)
+    (let [vals (into {} (keep #(when-let [[_ k v] (re-matches #"\s*(?:export\s+)?([A-Z_]+)\s*=\s*(.*?)\s*" %)]
+                                 [k (str/replace v #"^(['\"])(.*)\1$" "$2")]))
+                      (str/split-lines (slurp (str file))))]
+      (not-empty (or (get vals "REUS_IDE_BYOK_KEY") (get vals "ANTHROPIC_API_KEY"))))))
+
+(defn byok-key
+  "The BYOK key: $REUS_IDE_BYOK_KEY or $ANTHROPIC_API_KEY, else the first of key-files that has one. Never printed."
+  []
+  (or (not-empty (System/getenv "REUS_IDE_BYOK_KEY")) (not-empty (System/getenv "ANTHROPIC_API_KEY"))
+      (some key-in-file (key-files))))
 
 (defn server-env
   "The environment of the server: everything it writes lands in var/ide."

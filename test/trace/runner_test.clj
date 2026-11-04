@@ -9,6 +9,7 @@
             [clojure.test :refer [deftest is testing]]
             [trace.copilot-install :as ci]
             [trace.git :as g]
+            [trace.ide :as ide]
             [trace.runner :as run]))
 
 (def code (str (fs/parent (System/getProperty "babashka.config"))))
@@ -78,3 +79,15 @@
     (ci/uninstall! h)
     (is (not (fs/exists? (fs/path h "hooks" "reus.json"))))
     (is (not (fs/exists? (fs/path h "skills" "reus-compare"))))))
+
+(deftest byok-key-from-a-local-file
+  (fs/delete-tree (fs/path scratch "key"))
+  (fs/create-dirs (fs/path scratch "key"))
+  (let [a (str (fs/path scratch "key" "a.env")) b (str (fs/path scratch "key" "b.env"))]
+    (spit a "# a comment\nOTHER=1\n")
+    (spit b "OTHER=1\nexport ANTHROPIC_API_KEY=\"sk-test-123\"\n")
+    (is (= "sk-test-123" (#'ide/key-in-file b)))
+    (is (nil? (#'ide/key-in-file a)) "no key line")
+    (is (nil? (#'ide/key-in-file (str (fs/path scratch "key" "none.env")))) "no file")
+    (when-not (or (System/getenv "REUS_IDE_BYOK_KEY") (System/getenv "ANTHROPIC_API_KEY"))
+      (binding [ide/*key-files* [a b]] (is (= "sk-test-123" (ide/byok-key)) "the first file that has one")))))
