@@ -70,7 +70,7 @@
     (let [hooks (json/parse-string (slurp (str (fs/path h "hooks" "reus.json"))))
           skill (slurp (str (fs/path h "skills" "reus-compare" "SKILL.md")))]
       (is (= 1 (get hooks "version")))
-      (is (= #{"UserPromptSubmit" "PostToolUse" "PostToolUseFailure" "Stop" "SessionEnd"} (set (keys (get hooks "hooks")))))
+      (is (= #{"UserPromptSubmit" "PostToolUse" "PostToolUseFailure" "Stop" "SessionEnd" "SubagentStart" "SubagentStop"} (set (keys (get hooks "hooks")))))
       (is (str/includes? (get-in hooks ["hooks" "Stop" 0 "bash"]) "-m trace.copilot"))
       (is (str/includes? skill (str g/home)))
       (is (not (str/includes? skill "{{REUS}}")))
