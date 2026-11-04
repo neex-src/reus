@@ -17,6 +17,7 @@
 (def sid "59f32c65-5c45-4ff1-b0d7-2504f1ce8b60")
 
 (use-fixtures :each (fn [t] (binding [health/*claude-dir* (str (fs/path scratch "no-claude")) health/*seen-dir* (str (fs/path scratch "seen"))] (t))))
+(use-fixtures :once (fn [t] (try (fs/delete-tree scratch) (catch Exception _)) (t)))
 
 (defn- sh [dir & args] (apply p/shell {:dir (str dir) :out :string :err :string} args))
 
@@ -36,9 +37,10 @@
   process per payload, after `effect` did to the project what the tool did by then. Returns the trace repo's
   [repo project-name session-branch]."
   [name sid effect]
-  (fs/delete-tree scratch)
-  (let [proj (str (fs/path scratch "proj")) repo (str (fs/path scratch "traces"))
-        home (str (fs/path scratch "copilot-home"))
+  ;; a dir of its own: a worker woken by an earlier replay may still be idling on that one's repo
+  (let [base (str (fs/path scratch (str (System/nanoTime))))
+        proj (str (fs/path base "proj")) repo (str (fs/path base "traces"))
+        home (str (fs/path base "copilot-home"))
         events (str (fs/path home "session-state" sid "events.jsonl"))
         dir (fs/path code "test" "copilot" name)
         sub #(-> % (str/replace "@PROJ@" proj) (str/replace "@EVENTS@" events))
