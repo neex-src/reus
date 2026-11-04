@@ -1,0 +1,138 @@
+(ns trace.copilot
+  "GitHub Copilot CLI sessions into the same trace as the Claude ones. Copilot calls its hooks with the
+  VS Code / Claude style payload (PascalCase event names switch it on: snake_case fields, Claude's tool
+  names), so this is only an adapter in front of trace.hook:
+
+    bb --config <reus>/bb.edn -m trace.copilot        (payload on stdin; the event is its hook_event_name)
+
+  Subscribed events (copilot-lab/config/settings.json, `hooks`): UserPromptSubmit -> prompt,
+  PostToolUse / PostToolUseFailure -> tool, Stop / SessionEnd -> stop. SessionStart says nothing the
+  others do not, and is ignored.
+
+  What the adapter changes, seen in real Copilot 1.0.105 payloads (test/copilot/*.jsonl):
+    - tool_input: Copilot's keys become Claude's (path -> file_path, old_str -> old_string, new_str ->
+      new_string, file_text -> content), so observe finds the file a call is about;
+    - tool_result.text_result_for_llm becomes tool_response; the shell's tail `<shellId: N completed
+      with exit code K>` goes, and a K other than 0 becomes the `Exit code K` head Claude's results have;
+      a result_type other than success marks the response as an error;
+    - transcript_path is dropped (Stop sends Copilot's own events.jsonl, not a Claude transcript); the
+      reply of a Stop, its model and its token counts are read from that file instead
+      (<copilot home>/session-state/<session>/events.jsonl), and handed over as last_assistant_message,
+      model and usage, the way trace.record takes them from a payload without a transcript;
+    - the original payload rides along as \"copilot\", so refs/notes/event keeps every field.
+
+  Nothing else is touched: observe, spool, worker, record and the gui see a Claude-shaped event. Nothing
+  in the Claude path requires this ns. Like trace.hook, it always exits 0."
+  (:require [babashka.fs :as fs]
+            [cheshire.core :as json]
+            [clojure.string :as str]
+            [trace.git :as g]
+            [trace.health :as health]
+            [trace.hook :as hook]))
+
+(def ^:private events
+  {"UserPromptSubmit" "prompt" "PostToolUse" "tool" "PostToolUseFailure" "tool" "Stop" "stop" "SessionEnd" "stop"})
+
+(def ^:private claude-tools
+  {"bash" "Bash" "powershell" "Bash" "view" "Read" "create" "Write" "edit" "Edit" "str_replace_editor" "Edit"
+   "apply_patch" "Edit" "grep" "Grep" "rg" "Grep" "glob" "Glob" "web_fetch" "WebFetch" "web_search" "WebSearch"
+   "ask_user" "AskUserQuestion" "update_todo" "TodoWrite" "task" "Agent"})
+
+(def ^:private claude-keys
+  {"path" "file_path" "old_str" "old_string" "new_str" "new_string" "file_text" "content"})
+
+(defn tool-input [m] (update-keys (or m {}) #(get claude-keys % %)))
+
+(defn tool-response
+  "Claude-shaped result text of a Copilot tool_result: the shell tail turned into an `Exit code K` head
+  for a K other than 0; a result that did not succeed is an error."
+  [{:strs [result_type text_result_for_llm]}]
+  (let [t (str text_result_for_llm)
+        [_ body k] (re-matches #"(?s)(.*?)\s*<shellId: \S+ completed with exit code (-?\d+)>\s*" t)
+        t (if body (if (= "0" k) body (str "Exit code " k "\n" body)) t)]
+    (if (and result_type (not= "success" result_type)) {"text" t "is_error" true} t)))
+
+;; --- Copilot's own log of the session ------------------------------------------------------
+
+(defn- copilot-home [] (or (System/getenv "COPILOT_HOME") (str (fs/path (fs/home) ".copilot"))))
+
+(defn- events-file [{:strs [session_id transcript_path]}]
+  (let [f (or transcript_path (str (fs/path (copilot-home) "session-state" session_id "events.jsonl")))]
+    (when (fs/regular-file? f) (str f))))
+
+(defn- read-events [f]
+  (when f (vec (keep #(try (json/parse-string %) (catch Exception _ nil)) (str/split-lines (slurp f))))))
+
+(defn- this-turn
+  "The events after the last user.message."
+  [es]
+  (let [i (or (last (keep-indexed #(when (= "user.message" (get %2 "type")) %1) es)) -1)]
+    (subvec es (inc i))))
+
+(defn session-model
+  "The model the session runs: the first event (session.start) says it."
+  [f]
+  (when f
+    (with-open [r (clojure.java.io/reader f)]
+      (some-> (first (line-seq r)) (json/parse-string) (get-in ["data" "selectedModel"])))))
+
+(defn turn-facts
+  "{:reply :model :usage} of the last prompt's events: the last assistant text, the model that wrote it,
+  the tokens of all its model calls (the transcript's key names)."
+  [es]
+  (let [t (this-turn es)
+        said (last (filter #(and (= "assistant.message" (get % "type")) (not (str/blank? (get-in % ["data" "content"])))) t))
+        us (keep #(when (= "session.usage_record" (get % "type")) (get-in % ["data" "usage"])) t)
+        sum (fn [k] (reduce + 0 (keep #(get % k) us)))]
+    {:reply (get-in said ["data" "content"])
+     :model (or (get-in said ["data" "model"]) (some #(get % "model") us))
+     :usage (when (seq us)
+              {:input_tokens (sum "inputTokens") :output_tokens (sum "outputTokens")
+               :cache_read_input_tokens (sum "cacheReadTokens") :cache_creation_input_tokens (sum "cacheWriteTokens")})}))
+
+(defn- stop-facts
+  "turn-facts of the session's log; Copilot writes the answer before it fires Stop, a short wait covers a slow disk."
+  [in]
+  (loop [n 0]
+    (let [f (events-file in)
+          r (some-> f read-events turn-facts)]
+      (if (or (:reply r) (>= n 4))
+        (assoc r :file f)
+        (do (Thread/sleep 200) (recur (inc n)))))))
+
+;; --- the adapter ------------------------------------------------------------------------
+
+(defn adapt
+  "[event claude-shaped-input] for a Copilot hook payload (parsed), nil for an event that is not recorded."
+  [in]
+  (when-let [event (events (get in "hook_event_name"))]
+    (let [{:strs [session_id cwd hook_event_name tool_name tool_input tool_result error prompt]} in
+          model (session-model (events-file in))
+          base (cond-> {"session_id" session_id "cwd" cwd "hook_event_name" hook_event_name "copilot" in}
+                 (str/blank? (str session_id)) (dissoc "session_id"))]
+      [event
+       (case event
+         "prompt" (cond-> (assoc base "prompt" prompt) model (assoc "model" model))
+         "tool" (cond-> (assoc base
+                               "tool_name" (get claude-tools tool_name tool_name)
+                               "tool_input" (tool-input tool_input)
+                               "tool_response" (tool-response tool_result))
+                  error (assoc "error" error)
+                  model (assoc "model" model))
+         "stop" (let [{:keys [reply usage] smodel :model} (when (= "Stop" hook_event_name) (stop-facts in))]
+                  (cond-> base
+                    reply (assoc "last_assistant_message" reply)
+                    (or smodel model) (assoc "model" (or smodel model))
+                    usage (assoc "usage" usage))))])))
+
+(defn -main [& _]
+  (let [raw (slurp *in*)
+        in (try (json/parse-string raw) (catch Exception _ {}))]
+    (try
+      (when-let [[event input] (adapt in)]
+        (hook/record! g/*repo* event input (json/generate-string input)))
+      (catch Throwable e
+        (try (health/log! "copilot hook" (str (get in "hook_event_name")) in e)
+             (health/fail! :hook (str (get in "hook_event_name")) in e)
+             (catch Throwable _))))
+    (System/exit 0)))
