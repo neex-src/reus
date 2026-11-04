@@ -157,3 +157,9 @@
     (is (= {"input" "*** Begin Patch\n*** Add File: a/b.txt\n+hi\n*** End Patch\n" "file_path" "a/b.txt"}
            (cop/tool-input "*** Begin Patch\n*** Add File: a/b.txt\n+hi\n*** End Patch\n")))
     (is (= {} (cop/tool-input nil)))))
+
+(deftest ide-model-choice
+  (is (= ["auto" false] ((requiring-resolve 'trace.ide/choose-model) ["auto"] "auto" false)))
+  (is (= ["claude-haiku-4.5" false] ((requiring-resolve 'trace.ide/choose-model) ["claude-haiku-4.5" "gpt-5"] "haiku" true)) "a listed model wins over BYOK")
+  (is (= ["claude-haiku-5-5" true] ((requiring-resolve 'trace.ide/choose-model) ["auto"] "haiku" true)))
+  (is (nil? ((requiring-resolve 'trace.ide/choose-model) ["auto"] "haiku" false))))

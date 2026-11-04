@@ -89,11 +89,14 @@
 ;; --- the arms ------------------------------------------------------------------------------
 
 (defn parse-arm
-  "`[name=]model[:effort]` -> {:arm :model :effort}; model `default` leaves the model to Copilot."
+  "`[name=][ide:]model[:effort]` -> {:arm :model :effort :engine}; model `default` leaves the model to Copilot. With
+  the `ide:` prefix the arm runs through the engine of IntelliJ's Copilot plugin (trace.ide), not the CLI."
   [s]
   (let [[_ nm rest*] (re-matches #"(?:([^=:]+)=)?(.+)" s)
-        [model effort] (str/split rest* #":" 2)]
-    {:arm (slug (or nm (str model (when effort (str "-" effort))))) :model (when-not (= "default" model) model) :effort effort}))
+        ide? (str/starts-with? rest* "ide:")
+        [model effort] (str/split (cond-> rest* ide? (subs 4)) #":" 2)]
+    (cond-> {:arm (slug (or nm (str (when ide? "ide-") model (when effort (str "-" effort))))) :model (when-not (= "default" model) model) :effort effort}
+      ide? (assoc :engine :ide))))
 
 (def ^:dynamic *copilot-bin* "Overrides $COPILOT_BIN (tests)." nil)
 
@@ -116,19 +119,27 @@
 
 (defn run-arm!
   "Run the task's prompts as one session in a fresh copy; calls (say line) with progress. {:arm :dir :session :ok? :prompts n :ms}."
-  [task {:keys [arm model effort]} say]
-  (let [tdir (task-dir task)
+  [task {:keys [arm model effort engine]} say]
+  (let [ide? (= :ide engine)
+        tdir (task-dir task)
         spec (edn/read-string (slurp (str (fs/path tdir "task.edn"))))
         dir (var-dir "runs-work" (str task "--" arm))
         logs (var-dir "runs-work" "logs")
         sid (str (java.util.UUID/randomUUID))
-        own-hooks? (not (hooks-installed?))]
+        own-hooks? (and (not ide?) (not (hooks-installed?)))]
     (fs/delete-tree dir)
     (fs/create-dirs logs)
     (fs/copy-tree (fs/path tdir "start") dir)
     (when own-hooks? (install/spit-hooks! (fs/path dir ".github" "hooks" "reus.json")))
     (git-start! dir)
     (say (format "%s: session %s in %s%s" arm (subs sid 0 8) dir (if own-hooks? " (repo-level hooks)" "")))
+    (if ide?
+      ;; the IntelliJ plugin's engine: one session, the hooks are the ones in trace.ide's own Copilot home
+      (let [t00 (System/currentTimeMillis)
+            r ((requiring-resolve 'trace.ide/run-session!)
+               {:dir dir :session sid :model (or model "auto") :effort effort :say #(say (str arm ": " %))
+                :prompts (mapv #(str/trim (slurp (str (fs/path tdir "prompts" %)))) (:prompts spec))})]
+        (assoc r :arm arm :dir dir :ms (- (System/currentTimeMillis) t00)))
     (let [t00 (System/currentTimeMillis)]
       (loop [[f & more] (:prompts spec) n 1]
         (if-not f
@@ -147,7 +158,7 @@
             (if (zero? (:exit r))
               (recur more (inc n))
               {:arm arm :dir dir :session sid :ok? false :prompts (dec n) :ms (- (System/currentTimeMillis) t00)
-               :log (str (fs/path logs (format "%s--%s-%02d.log" task arm n)))})))))))
+               :log (str (fs/path logs (format "%s--%s-%02d.log" task arm n)))}))))))))
 
 (defn- wait-recorded!
   "Let the worker finish the spool (the hooks of the last prompts), up to 2 minutes."
@@ -182,7 +193,7 @@
 (defn- report [{:keys [results html]} task]
   (println)
   (doseq [r results] (println (format "%-24s %s, %d prompts, %ds%s" (:arm r) (if (:ok? r) "done" "STOPPED") (:prompts r) (quot (:ms r) 1000)
-                                      (if (:ok? r) "" (str "  (see " (:log r) ")")))))
+                                      (if (:ok? r) "" (str "  (see " (or (:log r) (:error r)) ")")))))
   (println)
   (println "Report (one file, send it as it is):" html)
   (println (str "Live viewer: bb trace:gui   then open http://127.0.0.1:7360/runs/" task)))
