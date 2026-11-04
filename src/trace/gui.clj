@@ -30,6 +30,7 @@
             [trace.git :as g :refer [git]]
             [trace.agents :as agents]
             [trace.fnlog :as fl]
+            [trace.mirror :as mirror]
             [trace.read :refer [tips mains prompt-nos prompt-data all-prompts live-branches ext-lang central?]])
   (:import [java.net URLDecoder URLEncoder]
            [java.time Instant ZoneId]
@@ -308,6 +309,7 @@
       (for [m (mains tips)] [:option {:value (str "/?m=" (enc m)) :selected (= [m] (vec ms))} m])])
    [:nav
     [:a {:href (str "/?" (m-param ms)) :class (when (= current :prompts) "on")} "Prompts"]
+    [:a {:href "/mirrors"} "Mirrors"]
     (for [m ms]
       (list [:a {:href (str "/files?m=" (enc m)) :class (when (= current m) "on")} (str "Files · " m)]
             (when (fl/on? m) [:a {:href (str "/fns?m=" (enc m)) :class (when (= current [:fns m]) "on")} (str "Functions · " m)])))]
@@ -581,6 +583,7 @@
 
         (= uri "/files") (html (files-page tips (get q "m")))
         (= uri "/file") (html (file-page tips (get q "m") (get q "path")))
+        (or (= uri "/mirrors") (str/starts-with? uri "/mirror/")) (or (mirror/route uri q) {:status 404 :body "not found"})
         (= uri "/fns") (html (fns-page tips (get q "m") (get q "file")))
         (= uri "/fn") (html (fn-page tips (get q "m") (get q "path")))
 
@@ -619,7 +622,7 @@
           {:status 200 :headers {"content-type" "application/json" "cache-control" "no-store"}
            :body (json/generate-string {:tips own :live (sort (live-in tips ms)) :latest (last (session-ids tips ms))})})
 
-        (#{"/static/app.css" "/static/app.js" "/static/shell.js"} uri)
+        (#{"/static/app.css" "/static/app.js" "/static/shell.js" "/static/mirror.css"} uri)
         {:status 200
          :headers {"content-type" (if (str/ends-with? uri ".css") "text/css" "text/javascript") "cache-control" "no-store"}
          :body (slurp (io/resource (str "trace/" (fs/file-name uri))))}
@@ -635,6 +638,7 @@
   (let [repo (str (fs/canonicalize (or repo g/*repo*)))
         port (parse-long (or port (if (= repo (str (fs/canonicalize g/default-repo))) "7360" "7357")))]
     (alter-var-root #'g/*repo* (constantly repo))
-    (srv/run-server #'handler {:ip "127.0.0.1" :port port})
+    (mirror/warm!)
+    (srv/run-server #'handler {:ip (or (System/getenv "TRACE_GUI_IP") "127.0.0.1") :port port})
     (println (str "trace view of " repo " on http://127.0.0.1:" port "/"))
     @(promise)))
