@@ -586,7 +586,7 @@
         (= uri "/files") (html (files-page tips (get q "m")))
         (= uri "/file") (html (file-page tips (get q "m") (get q "path")))
         (or (= uri "/mirrors") (str/starts-with? uri "/mirror/")) (or (mirror/route uri q) {:status 404 :body "not found"})
-        (or (= uri "/runs") (str/starts-with? uri "/runs/")) (or (runs/route uri) {:status 404 :body "not found"})
+        (or (= uri "/runs") (str/starts-with? uri "/runs/")) (or (runs/route uri q) {:status 404 :body "not found"})
         (= uri "/fns") (html (fns-page tips (get q "m") (get q "file")))
         (= uri "/fn") (html (fn-page tips (get q "m") (get q "path")))
 
