@@ -76,6 +76,10 @@
                      :requires ([trace.copilot-install])
                      :task (trace.copilot-install/uninstall!)}
 
+  copilot:catchup {:doc "Record Copilot sessions no hook recorded (IntelliJ or CLI), from Copilot's own log: [SESSION-ID | events.jsonl]..."
+                   :requires ([trace.copilot-events])
+                   :task (apply trace.copilot-events/-main *command-line-args*)}
+
   trace:test {:doc "Test the trace recorder"
               :requires ([clojure.test :as t] [trace.record-test])
               :task (let [{:keys [fail error]} (t/run-tests 'trace.record-test)]

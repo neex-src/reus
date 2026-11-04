@@ -10,7 +10,7 @@
   (--prompts: a folder of .md/.txt files in name order, or one file whose prompts are separated by a line of
   `---`), task.edn. An ARM is one model/effort. Each arm gets a fresh copy of start/ in var/runs-work/NAME--ARM
   (a git repo with one commit, so reus names the project `NAME--ARM`) and runs the prompts one after the other
-  as ONE session: `copilot -p PROMPT --allow-all-tools --session-id UUID [--model M] [--reasoning-effort E]`, the
+  as ONE session (an arm `ide:MODEL[:EFFORT]` runs it through the engine of IntelliJ's Copilot plugin instead, headless: trace.ide): `copilot -p PROMPT --allow-all-tools --session-id UUID [--model M] [--reasoning-effort E]`, the
   first call making the session and the others resuming it. Arms run side by side (--serial: one after the
   other). A second run of the same arm replaces the copy and is one more session of the same project.
 

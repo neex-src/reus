@@ -8,6 +8,7 @@
             [clojure.string :as str]
             [clojure.test :refer [deftest is testing use-fixtures]]
             [trace.copilot :as cop]
+            [trace.copilot-events :as cev]
             [trace.files :as files]
             [trace.git :as g :refer [git]]
             [trace.health :as health]))
@@ -145,7 +146,7 @@
 
 (deftest ide-details
   (testing "auto mode: the model is the one Copilot chose"
-    (let [f (str (fs/path scratch "auto" "events.jsonl"))]
+    (let [f (str (fs/path scratch (str "auto" (System/nanoTime)) "events.jsonl"))]
       (fs/create-dirs (fs/parent f))
       (spit f (str (json/generate-string {"type" "session.start" "data" {"selectedModel" "auto"}}) "\n"
                    (json/generate-string {"type" "session.auto_mode_resolved" "data" {"chosenModel" "gpt-6-luna"}}) "\n"))
@@ -163,3 +164,54 @@
   (is (= ["claude-haiku-4.5" false] ((requiring-resolve 'trace.ide/choose-model) ["claude-haiku-4.5" "gpt-5"] "haiku" true)) "a listed model wins over BYOK")
   (is (= ["claude-haiku-5-5" true] ((requiring-resolve 'trace.ide/choose-model) ["auto"] "haiku" true)))
   (is (nil? ((requiring-resolve 'trace.ide/choose-model) ["auto"] "haiku" false))))
+
+;; --- trace.copilot-events: the log of a finished session gives the payloads the hooks had ------------
+
+(defn- facts
+  "What a recorded event is made of. Not compared: the time of a call (the hook clock live, the log's when replayed)
+  and a failed call's output (empty from the hook, the error text from the log)."
+  [[event in]]
+  [event (cond-> (select-keys in ["hook_event_name" "tool_name" "tool_input" "tool_response" "prompt" "last_assistant_message" "model" "usage" "client"])
+           (= "PostToolUseFailure" (get in "hook_event_name")) (dissoc "tool_response"))])
+
+(deftest the-log-gives-the-hook-payloads
+  (doseq [[name sid] [["create-view" "c8b099e7-0a22-4595-b477-5ebcddc076ad"] ["edit-fail" sid] ["ide-create" "355f079f-34c9-4994-b0b5-7cb86052f1f5"]]]
+    (testing name
+      (let [dir (fs/path code "test" "copilot" name)
+            home (str (fs/path scratch "ev" name))
+            f (str (fs/path home "session-state" sid "events.jsonl"))
+            sub #(str/replace % "@EVENTS@" f)
+            _ (do (fs/create-dirs (fs/parent f))
+                  (spit f (sub (slurp (str (fs/path dir "events.jsonl")))))
+                  (when (fs/exists? (fs/path dir "workspace.yaml")) (spit (str (fs/path (fs/parent f) "workspace.yaml")) (slurp (str (fs/path dir "workspace.yaml"))))))
+            es (cev/read-log f)
+            ps (cev/payloads es f)
+            ;; the hooks reus subscribes, as the real payloads have them (the log up to the hook, like the hook saw it)
+            real (map json/parse-string (str/split-lines (sub (str/replace (slurp (str (fs/path dir "payloads.jsonl"))) "@PROJ@" "@PROJ@"))))
+            real (remove #(= "SessionStart" (get % "hook_event_name")) real)
+            starts (vec (keep-indexed #(when (and (= "hook.start" (get %2 "type")) (#{"userPromptSubmitted" "postToolUse" "postToolUseFailure" "agentStop" "sessionEnd"} (get-in %2 ["data" "hookType"]))) %1) es))
+            want (map (fn [r k] (facts (cop/adapt r {:es (subvec es 0 (if (= "Stop" (get r "hook_event_name")) (inc (nth starts k)) (nth starts k)))})))
+                      real (range))
+            got (map #(facts (cop/adapt (:payload %) {:es (:es %)})) ps)]
+        (is (= (count want) (count got)))
+        (is (= (map first want) (map first got)))
+        (doseq [[w g] (map vector want got)]
+          (is (= (second w) (second g))))))))
+
+(deftest catching-up-records-once
+  (let [base (str (fs/path scratch (str "cu" (System/nanoTime))))
+        proj (str (fs/path base "proj")) repo (str (fs/path base "traces"))
+        f (str (fs/path base "home" "session-state" "355f079f-34c9-4994-b0b5-7cb86052f1f5" "events.jsonl"))]
+    (fs/create-dirs proj) (fs/create-dirs (fs/parent f))
+    (sh proj "git" "init" "-q" "-b" "main") (spit (str (fs/path proj "hello.txt")) "hi\n")
+    (sh proj "git" "add" ".") (sh proj "git" "-c" "user.name=t" "-c" "user.email=t@t" "commit" "-q" "-m" "init")
+    (spit f (-> (slurp (str (fs/path code "test" "copilot" "ide-create" "events.jsonl"))) (str/replace "@PROJ@" proj) (str/replace "@EVENTS@" f)))
+    (spit (str (fs/path (fs/parent f) "workspace.yaml")) "id: x\nclient_name: copilot-intellij\n")
+    (binding [g/*repo* repo health/*claude-dir* (str (fs/path base "no-claude")) health/*seen-dir* (str (fs/path base "seen"))]
+      (let [r1 (cev/catch-up! f {:repo repo}) r2 (cev/catch-up! f {:repo repo})]
+        (is (= 5 (:recorded r1)) "prompt, two tool calls, stop, session end")
+        (is (= 0 (:recorded r2)) "nothing new the second time")
+        (let [subj (str/split-lines (git "log" "--format=%s" "proj/s/355f079f"))]
+          (is (= "response 00" (first subj)))
+          (is (= 5 (count subj)) "init, prompt, two calls, response"))
+        (is (str/includes? (git "notes" "--ref=event" "show" "proj/s/355f079f~1") "\"catchup\":true"))))))

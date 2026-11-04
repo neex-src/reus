@@ -2,7 +2,9 @@
   "Put reus into a user's Copilot: bb copilot:install / bb copilot:uninstall.
 
   Two files in the Copilot home ($COPILOT_HOME, else ~/.copilot), both found by the Copilot CLI and by the
-  IntelliJ plugin (same engine, same home):
+  IntelliJ plugin (same engine, same home; verified: the plugin's Copilot agent calls the user-level
+  hook file with the CLI's payloads, so IDE sessions are recorded live; sessions from before the install:
+  bb copilot:catchup):
     hooks/reus.json              the hook file: every prompt, tool call and stop is handed to `bb -m trace.copilot`
                                  of THIS checkout (paths baked in; the command does nothing when the checkout is gone)
     skills/reus-compare/SKILL.md the guided flow (skills/reus-compare/SKILL.md of the checkout, with its path filled in);
