@@ -113,3 +113,15 @@
       (is (= "hi\nsecond line" (git "show" (str b "~1:hello.txt"))))
       (is (= "Write" (trailer (str b "~4") "Tool")))
       (is (= "hello.txt" (trailer (str b "~4") "File"))))))
+
+(deftest the-reply-is-the-last-message-of-the-prompt
+  (let [msg (fn [content tools] {"type" "assistant.message" "data" {"content" content "toolRequests" tools "model" "m"}})
+        user {"type" "user.message" "data" {"content" "go"}}]
+    (testing "a log that ends at a message with tool requests is not the end of the prompt"
+      (is (false? (:final? (cop/turn-facts [user (msg "" [{"toolCallId" "a"}]) (msg "Now I'll edit" [{"toolCallId" "b"}])])))))
+    (testing "the final message has no tool requests"
+      (let [r (cop/turn-facts [user (msg "Now I'll edit" [{"toolCallId" "b"}]) (msg "All done." [])])]
+        (is (true? (:final? r)))
+        (is (= "All done." (:reply r)))))
+    (testing "a prompt before it does not count"
+      (is (false? (:final? (cop/turn-facts [(msg "old" []) user (msg "" [{"toolCallId" "a"}])])))))))

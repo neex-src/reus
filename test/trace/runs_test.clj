@@ -37,6 +37,12 @@
     (rec/handle! "stop" {"session_id" sid "cwd" d "hook_event_name" "Stop" "last_assistant_message" "done"
                          "model" "claude-haiku-5-5" "usage" usage})))
 
+(deftest what-a-call-was
+  (is (= :run (runs/step-kind {:kind :read :trailers {"Tool" "Bash"}})) "a shell call that names one file is not a read")
+  (is (= :read (runs/step-kind {:kind :run :trailers {"Tool" "Read"}})))
+  (is (= :edit (runs/step-kind {:kind :run :trailers {"Tool" "Bash"} :files [{:path "a"}]})) "a call that changed files is an edit")
+  (is (= :edit (runs/step-kind {:kind :read :trailers {"Tool" "Write"}}))))
+
 (deftest two-arms-one-task
   (fs/delete-tree scratch)
   (fs/create-dirs scratch)
@@ -80,8 +86,13 @@
           (is (= "cccccccc" (:sid8 (first (cheap shown)))) "the newest")
           (is (= "aaaaaaaa" (:sid8 (first (cheap (:shown (runs/task-runs tips "t" #{"cheap:aaaaaaaa"})))))) "or the one picked"))
         (is (str/includes? (:body (runs/route "/runs/t" {})) "show"))
-        (testing "the static report: one file, no script, no address"
+        (testing "the static report: one file, one inline script (expand all), no address, deltas, the whole change"
           (let [html (runs/static-html "t")]
             (is (str/includes? html "✓"))
-            (is (not (str/includes? html "<script")))
-            (is (not (re-find #"https?://" html)))))))))
+            (is (= 1 (count (re-seq #"<script" html))))
+            (is (not (re-find #"<script[^>]*src" html)))
+            (is (not (re-find #"https?://" html)))
+            (is (str/includes? html "Expand all"))
+            (is (str/includes? html "Compared with"))
+            (is (str/includes? html "The whole change"))
+            (is (str/includes? html "ok.txt"))))))))

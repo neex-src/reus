@@ -95,6 +95,10 @@
         said (last (filter #(and (= "assistant.message" (get % "type")) (not (str/blank? (get-in % ["data" "content"])))) t))
         us (keep #(when (= "session.usage_record" (get % "type")) (get-in % ["data" "usage"])) t)]
     {:reply (get-in said ["data" "content"])
+     ;; the prompt is over when its last model message asks for no tool; a log read before Copilot flushed that
+     ;; message ends at an earlier one (which has tool requests, or is the text before them)
+     :final? (let [m (last (filter #(= "assistant.message" (get % "type")) t))]
+               (boolean (and m (empty? (get-in m ["data" "toolRequests"])))))
      :model (or (get-in said ["data" "model"]) (some #(get % "model") us))
      :usage (usage-of us)}))
 
@@ -125,12 +129,12 @@
           started (assoc :duration-ms (max 0 (- now-ms started))))))))
 
 (defn- stop-facts
-  "turn-facts of the session's log; Copilot writes the answer before it fires Stop, a short wait covers a slow disk."
+  "turn-facts of the session's log; Copilot writes the answer before it fires Stop, but the log may not have it on disk yet: wait (2 s at most) for the prompt's last message."
   [in]
   (loop [n 0]
     (let [f (events-file in)
           r (some-> f read-events turn-facts)]
-      (if (or (:reply r) (>= n 4))
+      (if (or (:final? r) (>= n 10))
         (assoc r :file f)
         (do (Thread/sleep 200) (recur (inc n)))))))
 
