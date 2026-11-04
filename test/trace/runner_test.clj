@@ -17,7 +17,9 @@
 (deftest arms
   (is (= {:arm "claude-haiku-4.5-low" :model "claude-haiku-4.5" :effort "low"} (run/parse-arm "claude-haiku-4.5:low")))
   (is (= {:arm "fast" :model "gpt-5" :effort nil} (run/parse-arm "fast=gpt-5")))
-  (is (= {:arm "default-high" :model nil :effort "high"} (run/parse-arm "default:high"))))
+  (is (= {:arm "default-high" :model nil :effort "high"} (run/parse-arm "default:high")))
+  (is (= {:arm "ide-haiku-low" :model "haiku" :effort "low" :engine :ide} (run/parse-arm "ide:haiku:low")))
+  (is (= {:arm "x" :model "auto" :effort nil :engine :ide} (run/parse-arm "x=ide:auto"))))
 
 (deftest a-task-from-a-folder-and-a-prompts-file
   (fs/delete-tree scratch)

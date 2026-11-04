@@ -21,6 +21,11 @@
       model and usage, the way trace.record takes them from a payload without a transcript;
     - the original payload rides along as \"copilot\", so refs/notes/event keeps every field.
 
+  The IntelliJ plugin's Copilot agent runs the same engine and calls the same hook files with the same payloads
+ . What differs: its session log says `client_name: copilot-intellij` in workspace.yaml
+  (kept as `client` in the event), its model may be `auto` (then the model the auto mode chose is the session's),
+  and GPT models' apply_patch has one string for arguments (tool-input). trace.copilot-events replays a finished log.
+
   Nothing else is touched: observe, spool, worker, record and the gui see a Claude-shaped event. Nothing
   in the Claude path requires this ns. Like trace.hook, it always exits 0."
   (:require [babashka.fs :as fs]
@@ -41,7 +46,18 @@
 (def ^:private claude-keys
   {"path" "file_path" "old_str" "old_string" "new_str" "new_string" "file_text" "content"})
 
-(defn tool-input [m] (update-keys (or m {}) #(get claude-keys % %)))
+(defn- patch-file
+  "The first file an apply_patch text (`*** Add File: p`, `*** Update File: p`, `*** Delete File: p`) is about."
+  [s]
+  (some-> (re-find #"(?m)^\*\*\* (?:Add|Update|Delete) File: (.+?)\s*$" s) second))
+
+(defn tool-input
+  "Claude-shaped tool input. A tool whose arguments are one string (the GPT models' apply_patch) becomes
+  {input text, file_path the patch's first file}."
+  [m]
+  (cond (map? m) (update-keys m #(get claude-keys % %))
+        (string? m) (cond-> {"input" m} (patch-file m) (assoc "file_path" (patch-file m)))
+        :else {}))
 
 (defn tool-response
   "Claude-shaped result text of a Copilot tool_result: the shell tail turned into an `Exit code K` head
@@ -54,7 +70,7 @@
 
 ;; --- Copilot's own log of the session ------------------------------------------------------
 
-(defn- copilot-home [] (or (System/getenv "COPILOT_HOME") (str (fs/path (fs/home) ".copilot"))))
+(defn copilot-home [] (or (System/getenv "COPILOT_HOME") (str (fs/path (fs/home) ".copilot"))))
 
 (defn- events-file [{:strs [session_id transcript_path]}]
   (let [f (or transcript_path (str (fs/path (copilot-home) "session-state" session_id "events.jsonl")))]
@@ -70,11 +86,25 @@
     (subvec es (inc i))))
 
 (defn session-model
-  "The model the session runs: the first event (session.start) says it."
+  "The model the session runs: the first event (session.start) says it; for `auto` (the IntelliJ plugin's
+  default) the model Copilot's auto mode chose (session.auto_mode_resolved, among the first events)."
   [f]
   (when f
     (with-open [r (clojure.java.io/reader f)]
-      (some-> (first (line-seq r)) (json/parse-string) (get-in ["data" "selectedModel"])))))
+      (let [es (keep #(try (json/parse-string %) (catch Exception _ nil)) (take 12 (line-seq r)))
+            m (some-> (first es) (get-in ["data" "selectedModel"]))]
+        (if (= "auto" m)
+          (or (some #(when (= "session.auto_mode_resolved" (get % "type")) (get-in % ["data" "chosenModel"])) es) m)
+          m)))))
+
+(defn client-name
+  "The client that runs the session (workspace.yaml's client_name beside the log): `github/cli` for the CLI,
+  `copilot-intellij` for the IntelliJ plugin; nil when unknown."
+  [f]
+  (when f
+    (let [w (fs/path (fs/parent f) "workspace.yaml")]
+      (when (fs/regular-file? w)
+        (some-> (re-find #"(?m)^client_name:\s*(\S+)" (slurp (str w))) second)))))
 
 (defn usage-of
   "Claude's usage map (input_tokens = the uncached part; Copilot's inputTokens counts the cached too) of
@@ -141,17 +171,21 @@
 ;; --- the adapter ------------------------------------------------------------------------
 
 (defn adapt
-  "[event claude-shaped-input] for a Copilot hook payload (parsed), nil for an event that is not recorded."
-  [in]
+  "[event claude-shaped-input] for a Copilot hook payload (parsed), nil for an event that is not recorded. `es`: the
+  session's events as they were when the hook ran (trace.copilot-events replays a finished log); default: the log on disk."
+  [in & [{:keys [es]}]]
   (when-let [event (events (get in "hook_event_name"))]
     (let [{:strs [session_id cwd hook_event_name tool_name tool_input tool_result error prompt]} in
-          model (session-model (events-file in))
+          log (events-file in)
+          model (session-model log)
+          client (client-name log)
           base (cond-> {"session_id" session_id "cwd" cwd "hook_event_name" hook_event_name "copilot" in}
+                 client (assoc "client" client)
                  (str/blank? (str session_id)) (dissoc "session_id"))]
       [event
        (case event
          "prompt" (cond-> (assoc base "prompt" prompt) model (assoc "model" model))
-         "tool" (let [{cm :model :keys [usage duration-ms]} (some-> (events-file in) read-events
+         "tool" (let [{cm :model :keys [usage duration-ms]} (some-> (or es (some-> (events-file in) read-events))
                                                                        (call-facts (claude-name tool_name) tool_input (or (millis (str (get in "timestamp"))) (System/currentTimeMillis))))]
                   (cond-> (assoc base
                                  "tool_name" (claude-name tool_name)
@@ -161,7 +195,7 @@
                     (or cm model) (assoc "model" (or cm model))
                     usage (assoc "usage" usage)
                     duration-ms (assoc "duration_ms" duration-ms)))
-         "stop" (let [{:keys [reply usage] smodel :model} (when (= "Stop" hook_event_name) (stop-facts in))]
+         "stop" (let [{:keys [reply usage] smodel :model} (when (= "Stop" hook_event_name) (if es (turn-facts es) (stop-facts in)))]
                   (cond-> base
                     reply (assoc "last_assistant_message" reply)
                     (or smodel model) (assoc "model" (or smodel model))
