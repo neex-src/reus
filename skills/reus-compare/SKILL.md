@@ -44,7 +44,8 @@ can, or start it in the background and wait for it to finish):
 bb --config {{REUS}}/bb.edn runs:go --task <name> --prompts <prompts folder or file> --start <project folder> --check "<command>" --arm <arm1> --arm <arm2> ...
 ```
 
-Leave out `--check` when there is none. Do not change the arms' folders or the prompts while it runs. The command
+If the shell says the command is still running or was moved to the background, wait for it with read_bash until it
+finishes (it can take several minutes); never start it a second time. Leave out `--check` when there is none. Do not change the arms' folders or the prompts while it runs. The command
 prints one line per prompt as it goes and, at the end, the path of the report. If it fails at the start, show the
 error and stop; do not retry in a loop (a retry costs requests).
 

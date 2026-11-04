@@ -185,7 +185,7 @@
                                       (if (:ok? r) "" (str "  (see " (:log r) ")")))))
   (println)
   (println "Report (one file, send it as it is):" html)
-  (println "Live viewer: bb trace:gui   then open http://127.0.0.1:7360/runs/" task))
+  (println (str "Live viewer: bb trace:gui   then open http://127.0.0.1:7360/runs/" task)))
 
 (defn -main
   "bb runs:go ..."
