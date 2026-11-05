@@ -46,7 +46,18 @@
   (range-set [d p excl incl])
   (trace-files [d session cwd transcript]))
 
-(defn project-name [s] (str/replace (str s) #"[^A-Za-z0-9._-]" "_"))
+(defn project-name
+  "A project name that is also a valid git ref component (it names refs/heads/<name>/...): characters
+  outside [A-Za-z0-9._-] become _, and so do a leading dot (~/projects/.claude), a run of dots, a trailing
+  dot and a trailing .lock, which git refuses."
+  [s]
+  (let [n (-> (str s)
+              (str/replace #"[^A-Za-z0-9._-]" "_")
+              (str/replace #"\.{2,}" "_")
+              (str/replace #"^\." "_")
+              (str/replace #"\.lock$" "_lock")
+              (str/replace #"\.$" "_"))]
+    (if (str/blank? n) "_" n)))
 
 (defn projects-root
   "Where the projects are, for a cwd outside git: $TRACE_PROJECTS, else the dir the reus checkout
