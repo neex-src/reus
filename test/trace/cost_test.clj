@@ -57,6 +57,15 @@
         (is (= 2 (:messages sonnet)))
         (is (= 2 (get-in res [:projects "alpha" :sessions] 2)))))))
 
+(deftest generate-calls-as-the-cli-reported
+  (fs/delete-tree scratch)
+  (fs/create-dirs (fs/path scratch "run"))
+  (spit (str (fs/path scratch "run" "usage-1.edn"))
+        (pr-str {:model "claude-haiku-5-5" :session-id "s" :took-ms 15277 :usage {:input 49536 :output 2364 :input-fresh 8 :cache-read 35294 :cache-write 14234 :cost-usd 0.00438254}}))
+  (let [[c] (cost/generate-calls [(str (fs/path scratch "run"))])]
+    (is (= [49536 2364 0.00438254 15.277] ((juxt :tokens-in :tokens-out :cost-usd :seconds) c)))
+    (is (re-find #"usage-1.edn$" (:source c)))))
+
 (deftest git-and-traces
   (fs/delete-tree scratch)
   (let [repo (fs/path scratch "repo") z (java.time.ZoneId/of "UTC")]

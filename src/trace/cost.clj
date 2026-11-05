@@ -25,7 +25,8 @@
     {:zone \"Europe/Bucharest\"            the day boundary
      :transcripts [dir ...]               ~/.claude/projects folders (read only)
      :traces [{:name :repo} ...]          reus trace repos (read only)
-     :projects {name {:roots [folder ...] :git [bare-repo ...] :counted? true}}}   roots: where its sessions ran"
+     :projects {name {:roots [folder ...] :git [bare-repo ...] :counted? true}}   roots: where its sessions ran
+     :generate-runs [dir ...]}            Generate run dirs whose model calls are quoted (their usage-N.edn)"
   (:require [babashka.fs :as fs]
             [babashka.process :as p]
             [cheshire.core :as json]
@@ -304,6 +305,16 @@
      :commits-on-days-with-no-recorded-session (reduce + (map val (remove #(contains? dayset (key %)) by-day)))
      :days-with-commits-and-no-session (count (remove dayset (keys by-day)))}))
 
+(defn generate-calls
+  "The model calls of Generate run dirs (Deliberator's <ws>/sessions/<key>/generate/<stamp>-<name>), as the CLI reported
+  them in the run's usage-N.edn: tokens in/out, cost, seconds, with the file they come from."
+  [dirs]
+  (vec (for [d dirs f (sort (fs/glob d "usage-*.edn"))
+             :let [u (edn/read-string (slurp (str f))) us (:usage u)]]
+         {:source (str f) :model (:model u) :session-id (:session-id u)
+          :tokens-in (:input us) :tokens-in-fresh (:input-fresh us) :cache-read (:cache-read us) :cache-write (:cache-write us)
+          :tokens-out (:output us) :cost-usd (:cost-usd us) :seconds (some-> (:took-ms u) (/ 1000.0))})))
+
 (defn- usd [x] (format "$%,.0f" (double x)))
 
 (defn caveats
@@ -367,7 +378,7 @@
         by-model (apply merge-with (fn [a b] (merge-with #(+ (or %1 0) (or %2 0)) a b)) (map #(into {} (map (fn [[m x]] [m (select-keys x [:messages :out :in-fresh :cache-read :cache-write :cache-write-1h :cost-usd])])) (:by-model %)) counted))]
     (as-> {:generated (str (Instant/now)) :method method
      :projects rows
-     :attached (:attach method)
+     :generate-calls (generate-calls (:generate-runs method))
      :total {:projects (vec (keep (fn [[k v]] (when (:counted? v) k)) rows))
              :sessions (total :sessions) :agent-runs (total :agent-runs) :prompts (total :prompts) :tool-calls (total :tool-calls)
              :messages (total :messages) :cost-usd (total :cost-usd) :by-model (into (sorted-map) by-model)
