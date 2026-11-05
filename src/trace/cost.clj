@@ -380,6 +380,8 @@
     (as-> {:generated (str (Instant/now)) :method method
      :projects rows
      :generate-calls (generate-calls (:generate-runs method))
+     :traces-vs-transcripts {:what "per project, of the sessions both sources have: the share of the transcripts' output tokens that the traces' Tokens-Out trailers hold (the traces miss the end of a turn written after the Stop hook and every turn longer than the 256 KB the hook looked at, both fixed 2026-11-05, and all sessions before reus)"
+                             :by-project (into (sorted-map) (for [[n p] rows] [n (select-keys (:gap p) [:sessions-both :sessions-only-in-transcripts :sessions-only-in-traces :out-share-in-traces])]))}
      :total {:projects (vec (keep (fn [[k v]] (when (:counted? v) k)) rows))
              :sessions (total :sessions) :agent-runs (total :agent-runs) :prompts (total :prompts) :tool-calls (total :tool-calls)
              :messages (total :messages) :cost-usd (total :cost-usd) :by-model (into (sorted-map) by-model)
@@ -403,7 +405,7 @@
   [{:keys [projects total caveats generate-calls elsewhere]}]
   (str "# What building cost (reus, from transcripts and traces)\n\n"
        "Tokens at list price, counted from what Claude Code and reus recorded. Not an invoice: the work ran on a subscription.\n\n"
-       "| project | sessions | agent runs | prompts | tool calls | tokens in | tokens out | list price | days | commits | lines +/- |\n|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n"
+       "| project | sessions | agent runs | prompts | tool calls | tokens read (cache included) | tokens out | list price | days | commits | lines +/- |\n|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n"
        (apply str (for [[n p] projects :when (:counted? p)]
                     (format "| %s | %d | %d | %d | %s | %s | %s | $%s | %d | %d | +%s / -%s |\n" n (:sessions p) (:agent-runs p) (:prompts p) (thousands (:tool-calls p))
                             (mtok (get-in p [:tokens :in-total])) (mtok (get-in p [:tokens :out])) (thousands (:cost-usd p)) (:days p)
