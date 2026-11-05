@@ -156,6 +156,7 @@
 (defn- s7 [x] (some-> x str (subs 0 (min 7 (count (str x))))))
 (defn- stamp-str [ms] (when ms (.format (DateTimeFormatter/ofPattern "MMM d, HH:mm") (.atZone (Instant/ofEpochMilli ms) (ZoneId/systemDefault)))))
 
+(defn- n-of "n with its noun, one or many: 1 call, 2 calls." [n one many] (str (thou n) " " (if (= 1 n) one many)))
 (defn- err-word [x] (if (keyword? x) (name x) (str x)))
 (defn- err? [x] (and x (not (#{"" "success"} (err-word x)))))
 
@@ -551,7 +552,7 @@
                                                         (str/replace-first cmp #"^The twin" "the twin"))
                              (pos? both) "There is no cost or time to compare."
                              :else "There is nothing yet that both sides ran.")
-                       (str "nod was called " (thou (:nod-calls sm)) (if (= 1 (:nod-calls sm)) " time" " times")
+                       (str "nod was called " (n-of (:nod-calls sm) "time" "times")
                             (when (pos? (:nod-calls sm)) (str "; " (thou (:nod-failed sm)) " failed")) ".")]))))
 
 (defn- tile [label rv tv & [note]]
@@ -588,7 +589,7 @@
      (prompt-view text)
      (side-table real mirror)
      [:div.line
-      (when mirror (list [:span (thou (nod-calls-of mirror)) " nod calls"]
+      (when mirror (list [:span (n-of (nod-calls-of mirror) "nod call" "nod calls")]
                          (if (seq failed) [:span.state.bad (str (count failed) " failed")] (when (pos? (nod-calls-of mirror)) [:span.state.good "none failed"]))))
       (when (seq other) [:span.state.bad (str (count other) " other tool errors")])
       (when (seq refused) [:span.state.warn (str (count refused) " refused by the guard")])
@@ -671,10 +672,10 @@
      (if (zero? (nod-calls-of twin))
        [:p.muted "The twin made no nod call."]
        (list
-        [:p (thou (nod-calls-of twin)) " nod calls by the twin, by what they asked nod to do:"]
+        [:p (n-of (nod-calls-of twin) "nod call" "nod calls") " by the twin, by what they asked nod to do:"]
         (chips (:nod twin))
         [:p.muted "The twin waited " [:b (dur-str (:nod-wait twin))] " for nod in all"
-         (when (seq (:nod-slow twin)) (str "; " (count (:nod-slow twin)) " calls took over a minute"))
+         (when (seq (:nod-slow twin)) (str "; " (n-of (count (:nod-slow twin)) "call took" "calls took") " over a minute"))
          (when (seq (:nod-hung twin)) (str "; " (count (:nod-hung twin)) " got no answer at all"))
          "."]))
      (if (seq failed)
@@ -711,7 +712,7 @@
             (tile "busy time" (dur-str (:real-busy sm)) (dur-str (:twin-busy sm)))
             (tile "API calls" (thou (:real-calls sm)) (thou (:twin-calls sm)))
             (tile "tokens out" (thou (get-in real [:tokens :output])) (thou (get-in twin [:tokens :output])))
-            (one-tile "nod" (str (thou (:nod-calls sm)) " calls")
+            (one-tile "nod" (n-of (:nod-calls sm) "call" "calls")
                       (str (thou (:nod-failed sm)) " failed" (when (seq (:nod-versions sm)) (str " · nod " (str/join ">" (map s7 (:nod-versions sm)))))))
             (one-tile "guard" (str (:refused sm) " refused") (str (:hatch sm) " went around nod with a reason"))]
            [:h2 "Totals"]
@@ -738,7 +739,7 @@
         nods (count (filter :nod? calls))]
     [:section
      [:h2 title " " [:span.muted {:style "font-weight:400;font-size:.9rem"}
-                     (str (count calls) " calls" (when (pos? nods) (str ", " nods " nod")) (when-let [n (seq (filter :failed calls))] (str ", " (count n) " failed")))]]
+                     (str (n-of (count calls) "call" "calls") (when (pos? nods) (str ", " nods " nod")) (when-let [n (seq (filter :failed calls))] (str ", " (count n) " failed")))]]
      (if (seq calls)
        [:div.calls (for [c calls] (call-view c :open? (:nod? c)))]
        [:p.muted "No calls" (when (not= show "all") " of this kind") "."])]))
