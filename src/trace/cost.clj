@@ -96,18 +96,23 @@
                       (let [cwd (or (:cwd e) (:cwd st))]
                         (-> st (assoc :cwd cwd) (update :prompts conj {:ts (:timestamp e) :cwd cwd})))
                       st))
+                  (str/includes? l "\"type\":\"cost-state\"")
+                  (let [e (try (json/parse-string l true) (catch Exception _ nil))]
+                    (if (and e (= "cost-state" (:type e))) (assoc st :cost-state (:totalCostUSD e)) st))
                   :else st))
               {:cwd nil :msgs {} :prompts []} (line-seq rd))
              :agent (when agent? (str/replace (name* f) #"^agent-" ""))
              :session (if agent? (name* (fs/parent (fs/parent f))) (name* f))))))
 
-(defn- fresh-acc [] {:projects {} :elsewhere nil :sess {} :seen #{} :files 0})
+(defn- fresh-acc [] {:projects {} :elsewhere nil :sess {} :seen #{} :files 0 :cli {} :mine {}})
 
 (defn- add-file
   "Fold a scanned transcript into acc; a message id seen before (a resumed session copies its past) is skipped."
-  [acc {:keys [session agent msgs prompts]} projects z]
+  [acc {:keys [session agent msgs prompts cost-state]} projects z]
   (let [skey (str (subs session 0 (min 8 (count session))) (when agent (str "-" agent)))
-        acc (update acc :files inc)
+        acc (cond-> (update acc :files inc) cost-state (assoc-in [:cli session] cost-state))
+        acc (update-in acc [:mine session] (fnil + 0.0)
+                       (reduce + 0.0 (for [[id {:keys [model usage]}] msgs :when (not (contains? (:seen acc) id))] (or (runs/cost {:model model :usage (usage-map usage)}) 0.0))))
         acc (reduce
              (fn [acc [id {:keys [ts cwd model usage tools]}]]
                (if (or (contains? (:seen acc) id) (= "<synthetic>" model))
@@ -334,7 +339,11 @@
                    :prompts (:prompts e 0) :tool-calls (:tool-calls e 0) :messages (:messages (sum-tally (:by-model e)) 0)
                    :tokens (tokens (sum-tally (:by-model e))) :cost-usd (sum-cost pm)
                    :by-model (into (sorted-map) (map (fn [[m x]] [m (merge {:messages (:messages x)} (tokens x) {:cost-usd (:cost x)})])) pm)})
-     :transcripts {:files (:files t) :message-ids (count (:seen t))}}))
+     :transcripts {:files (:files t) :message-ids (count (:seen t))}
+     :cli-check (let [ks (filter #(pos? (get-in t [:cli %] 0.0)) (keys (:cli t)))
+                      cli (reduce + (map #(get-in t [:cli %]) ks)) mine (reduce + (map #(get-in t [:mine %] 0.0) ks))]
+                  {:what "sessions whose transcript carries the CLI's own cost-state: its total, and what the messages of the session (subagent runs too) add up to at the same prices"
+                   :sessions (count ks) :cli-usd cli :messages-usd mine :messages-share (when (pos? cli) (/ mine cli))})}))
 
 ;; --- command line ------------------------------------------------------------------------------------
 
