@@ -48,6 +48,10 @@
              :requires ([trace.fns])
              :task (apply trace.fns/-main *command-line-args*)}
 
+  trace:cost {:doc "What building a project cost, from transcripts (primary) and traces (cross-check), read only: bb trace:cost --method FILE | --from RESULT [--out FILE]"
+              :requires ([trace.cost])
+              :task (apply trace.cost/-main *command-line-args*)}
+
   trace:probe {:doc "Was the transcript written when the hook fired? bb trace:probe [repo]"
                :requires ([trace.probe])
                :task (apply trace.probe/-main *command-line-args*)}
@@ -86,8 +90,8 @@
                       (System/exit (if (zero? (+ fail error)) 0 1)))}
 
   test {:doc "Every test of this repo (the shell.js one needs node)"
-        :requires ([clojure.test :as t] [trace.record-test] [trace.hook-test] [trace.replay-test] [trace.probe-test] [trace.store-test] [trace.turn-test] [trace.ignore-test] [trace.gui-test] [trace.fns-test] [trace.health-test] [trace.mirror-test] [trace.copilot-test] [trace.runs-test] [trace.runner-test] [jsonl.read-test])
-        :task (let [{:keys [fail error]} (t/run-tests 'trace.record-test 'trace.hook-test 'trace.replay-test 'trace.probe-test 'trace.store-test 'trace.turn-test 'trace.ignore-test 'trace.gui-test 'trace.fns-test 'trace.health-test 'trace.mirror-test 'trace.copilot-test 'trace.runs-test 'trace.runner-test 'jsonl.read-test)
+        :requires ([clojure.test :as t] [trace.record-test] [trace.hook-test] [trace.replay-test] [trace.probe-test] [trace.store-test] [trace.turn-test] [trace.ignore-test] [trace.gui-test] [trace.call-test] [trace.cost-test] [trace.fns-test] [trace.health-test] [trace.mirror-test] [trace.copilot-test] [trace.runs-test] [trace.runner-test] [jsonl.read-test])
+        :task (let [{:keys [fail error]} (t/run-tests 'trace.record-test 'trace.hook-test 'trace.replay-test 'trace.probe-test 'trace.store-test 'trace.turn-test 'trace.ignore-test 'trace.gui-test 'trace.call-test 'trace.cost-test 'trace.fns-test 'trace.health-test 'trace.mirror-test 'trace.copilot-test 'trace.runs-test 'trace.runner-test 'jsonl.read-test)
                     js (:exit (shell {:continue true} "node test/trace/shell_test.js"))]
                 (System/exit (if (and (zero? (+ fail error)) (zero? js)) 0 1)))}
 

@@ -30,23 +30,41 @@
 ;; --- numbers --------------------------------------------------------------------------------
 
 (def prices
-  "model -> $ per million tokens {:in :out :cr (cache read) :cw (cache write)}; list prices (claude-api skill, 2026-10-06)."
+  "model -> $ per million tokens {:in :out :cr (cache read) :cw (cache write, the 5-minute kind; the 1-hour kind is 2x :in)}.
+  Checked against the CLI's own cost: haiku-5-5 (a Generate call's total_cost_usd), sonnet-5-5 and opus-5-5 (the
+  cost-state entries of Claude Code transcripts, sessions whose messages are all there: equal to the cent; sonnet and
+  opus read the cache at 0.05x their input price, not 0.1x). NOT checked: fable-5-1 (oglinda's fit), the older rows."
   {"claude-haiku-5-5" {:in 0.10 :out 0.50 :cr 0.01 :cw 0.125}
+   "claude-fable-5-1" {:in 10.00 :out 50.00 :cr 0.25 :cw 12.50}
    "claude-haiku-4-5" {:in 1.00 :out 5.00 :cr 0.10 :cw 1.25}
-   "claude-sonnet-5-5" {:in 2.00 :out 10.00 :cr 0.20 :cw 2.50}
+   "claude-sonnet-5-5" {:in 2.00 :out 10.00 :cr 0.10 :cw 2.50}
    "claude-sonnet-5" {:in 2.00 :out 10.00 :cr 0.20 :cw 2.50}
    "claude-sonnet-4-6" {:in 3.00 :out 15.00 :cr 0.30 :cw 3.75}
-   "claude-opus-5-5" {:in 4.00 :out 20.00 :cr 0.40 :cw 5.00}
+   "claude-opus-5-5" {:in 4.00 :out 20.00 :cr 0.20 :cw 5.00}
    "claude-opus-5" {:in 5.00 :out 25.00 :cr 0.50 :cw 6.25}
    "claude-opus-4-8" {:in 5.00 :out 25.00 :cr 0.50 :cw 6.25}})
 
+(defn price-of
+  "The price row of a model: its own, else the row whose name it starts with (dated ids: claude-haiku-4-5-20251001,
+  claude-opus-5[1m]), the longest first; nil for none."
+  [model]
+  (let [m (str model)]
+    (or (get prices m)
+        (some (fn [[k row]] (when (str/starts-with? m k) row)) (sort-by (comp - count key) prices)))))
+
 (defn cost
-  "USD of a turn {:model :usage}, nil when the model has no price."
+  "USD of a turn {:model :usage}, nil when the model has no price. A cache write is priced at 1.25x the
+  input price (the 5-minute cache), the part the usage says went to the 1-hour cache
+  (:cache_1h_input_tokens, which Claude Code uses) at 2x: with it the number is the CLI's own
+  `total_cost_usd`."
   [{:keys [model usage]}]
-  (when-let [pr (get prices model)]
-    (/ (+ (* (:in pr) (or (:input_tokens usage) 0)) (* (:out pr) (or (:output_tokens usage) 0))
-          (* (:cr pr) (or (:cache_read_input_tokens usage) 0)) (* (:cw pr) (or (:cache_creation_input_tokens usage) 0)))
-       1e6)))
+  (when-let [pr (price-of model)]
+    (let [cw (or (:cache_creation_input_tokens usage) 0)
+          h (min cw (or (:cache_1h_input_tokens usage) 0))]
+      (/ (+ (* (:in pr) (or (:input_tokens usage) 0)) (* (:out pr) (or (:output_tokens usage) 0))
+            (* (:cr pr) (or (:cache_read_input_tokens usage) 0))
+            (* (:cw pr) (- cw h)) (* 2 (:in pr) h))
+         1e6))))
 
 (defn- usd [x] (if x (if (< x 0.01) (format "$%.4f" x) (format "$%.3f" x)) "–"))
 (defn- thou [n] (if n (let [s (str n)] (str/replace s #"\B(?=(\d{3})+(?!\d))" ",")) "–"))

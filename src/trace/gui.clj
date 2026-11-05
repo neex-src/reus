@@ -14,6 +14,8 @@
     /p/<session8>@NN?m=a    prompt NN of a session of a
     /files?m=a           every file a edited
     /file?m=a&path=P     every edit of P, in order: the file's evolution
+    /calls               the model calls (sessions of one prompt), newest first (trace.call)
+    /call/<session8>[?m=a&run=DIR]   one model call explained: what went in, what it looked at, what came back, tokens, cost
     /fns?m=a[&file=F]    every Clojure definition a ever had (the fn layer, trace.fns)
     /fn?m=a&path=F/D     every version of definition D of file F, oldest first: its evolution
     /x/show?r=REV        git cat-file -p REV (a blob sha, or <commit>:<path>)
@@ -29,6 +31,7 @@
             [org.httpkit.server :as srv]
             [trace.git :as g :refer [git]]
             [trace.agents :as agents]
+            [trace.call :as call]
             [trace.fnlog :as fl]
             [trace.mirror :as mirror]
             [trace.runs :as runs]
@@ -312,6 +315,7 @@
     [:a {:href (str "/?" (m-param ms)) :class (when (= current :prompts) "on")} "Prompts"]
     [:a {:href "/mirrors"} "Mirrors"]
     [:a {:href "/runs"} "Runs"]
+    [:a {:href "/calls"} "Calls"]
     (for [m ms]
       (list [:a {:href (str "/files?m=" (enc m)) :class (when (= current m) "on")} (str "Files · " m)]
             (when (fl/on? m) [:a {:href (str "/fns?m=" (enc m)) :class (when (= current [:fns m]) "on")} (str "Functions · " m)])))]
@@ -587,6 +591,7 @@
         (= uri "/file") (html (file-page tips (get q "m") (get q "path")))
         (or (= uri "/mirrors") (str/starts-with? uri "/mirror/")) (or (mirror/route uri q) {:status 404 :body "not found"})
         (or (= uri "/runs") (str/starts-with? uri "/runs/")) (or (runs/route uri q) {:status 404 :body "not found"})
+        (or (= uri "/calls") (str/starts-with? uri "/call/")) (or (call/route uri q) {:status 404 :body "not found"})
         (= uri "/fns") (html (fns-page tips (get q "m") (get q "file")))
         (= uri "/fn") (html (fn-page tips (get q "m") (get q "path")))
 

@@ -96,3 +96,10 @@
             (is (str/includes? html "Compared with"))
             (is (str/includes? html "The whole change"))
             (is (str/includes? html "ok.txt"))))))))
+
+(deftest cost-of-the-one-hour-cache
+  (testing "a call the CLI priced itself: claude -p --model haiku, 2026-11-05 (generate.edn of session 6be9bc33): $0.00438254"
+    (let [u {:input_tokens 8 :output_tokens 2364 :cache_read_input_tokens 35294 :cache_creation_input_tokens 14234 :cache_1h_input_tokens 14234}]
+      (is (< (Math/abs (- 0.00438254 (runs/cost {:model "claude-haiku-5-5" :usage u}))) 1e-9))
+      (is (< (Math/abs (- 0.00331499 (runs/cost {:model "claude-haiku-5-5" :usage (dissoc u :cache_1h_input_tokens)}))) 1e-9)
+          "without the split a cache write is the 5-minute one"))))

@@ -74,6 +74,15 @@
         (is (= 4 (:assistant-messages s)))
         (is (= 22 (get-in s [:usage :output_tokens])) "m1 5 (its lines repeat the usage), m2 5, m3 5, m4 7"))
       (is (= 5000 (:duration-ms (turn/stop ix 15)))))
+    (testing "the turn of a promptId, in a file as it is now: up to the next prompt"
+      (is (= (turn/stop ix 15) (turn/stop-of ix "p-00.000")))
+      (is (= "done" (turn/last-text-of ix "p-00.000")))
+      (is (nil? (turn/last-text-of ix "p-06.000")) "the last prompt has no text yet")
+      (is (nil? (turn/stop-of ix "p-nope"))))
+    (testing "the 1-hour part of a cache write is kept when the line says it"
+      (let [e (assoc-in (a "01.000" "mx" {"type" "text" "text" "x"}) ["message" "usage" "cache_creation"] {"ephemeral_1h_input_tokens" 7 "ephemeral_5m_input_tokens" 3})]
+        (is (= {:input_tokens 1 :output_tokens 5 :cache_creation_input_tokens 10 :cache_read_input_tokens 100 :cache_1h_input_tokens 7}
+               (:usage (turn/stop (turn/index [(prompt* "00.000" "p") e]) 2))))))
     (is (= 16 (turn/find-prompt ix "and then?")))
     (is (= "done" (turn/last-text entries)))))
 
@@ -161,3 +170,58 @@
             (is (map? (:turn-end d)))
             (is (= (count (:steps d)) (count (filter :turn (:steps d))))))
           (is (= "m2026-01-01T11:00:03.000Z" (:message-id (:turn ed)))))))))
+
+;; --- the end of a turn written after the Stop hook (`claude -p`) ---------------------------------
+
+(def ^:private race-scratch (str (fs/path (fs/parent (System/getProperty "babashka.config")) ".scratch" "turn-race-test")))
+
+(defn- race! [tag final-after-ms]
+  (fs/delete-tree race-scratch)
+  (let [proj (git-init (fs/path race-scratch "proj")) tr (str (fs/path race-scratch "s1.jsonl"))
+        final (str (json/generate-string (a "05.000" "m4" {"type" "text" "text" "all done"} {"stop_reason" "end_turn" "usage" (usage 7)})) "\n")]
+    (jsonl! tr [(prompt* "00.000" "do it") (a "01.000" "m1" (use* "u1")) (res "02.000" "u1")])
+    (binding [g/*repo* (str (fs/path race-scratch "traces"))]
+      (ev "prompt" {"session_id" tag "cwd" proj "prompt" "do it" "transcript_path" tr})
+      (let [late (future (Thread/sleep final-after-ms) (spit tr final :append true))
+            t0 (System/currentTimeMillis)]
+        (ev "stop" {"session_id" tag "cwd" proj "transcript_path" tr "prompt_id" "p-00.000" "last_assistant_message" "all done"})
+        (let [ms (- (System/currentTimeMillis) t0)]
+          @late
+          {:note (edn/read-string (note "turn" (git "rev-parse" (str "proj/s/" tag)))) :ms ms})))))
+
+(deftest stop-waits-for-the-end-of-the-turn
+  (testing "the final message reaches the transcript after the hook fired: its tokens are counted"
+    (let [{:keys [note]} (race! "s1" 400)]
+      (is (= 2 (:assistant-messages note)))
+      (is (= 12 (get-in note [:usage :output_tokens])) "m1 5 + the late m4 7; read at the hook's size it was 5")
+      (is (= 2 (get-in note [:usage :input_tokens])))))
+  (testing "a message that never turns up: the turn as it is, after the wait"
+    (with-redefs [rec/stop-wait-ms 300]
+      (let [{:keys [note ms]} (race! "s2" 2000)]
+        (is (= 1 (:assistant-messages note)))
+        (is (= 5 (get-in note [:usage :output_tokens])))
+        (is (< ms 1900) "it did not wait for the late message"))))
+  (testing "a transcript that is complete at the hook: no wait"
+    (fs/delete-tree race-scratch)
+    (let [proj (git-init (fs/path race-scratch "proj")) tr (str (fs/path race-scratch "s1.jsonl"))]
+      (jsonl! tr [(prompt* "00.000" "do it") (a "05.000" "m4" {"type" "text" "text" "all done"} {"stop_reason" "end_turn" "usage" (usage 7)})])
+      (binding [g/*repo* (str (fs/path race-scratch "traces"))]
+        (ev "prompt" {"session_id" "s3" "cwd" proj "prompt" "do it" "transcript_path" tr})
+        (let [t0 (System/currentTimeMillis)]
+          (ev "stop" {"session_id" "s3" "cwd" proj "transcript_path" tr "prompt_id" "p-00.000" "last_assistant_message" "all done"})
+          (is (< (- (System/currentTimeMillis) t0) 2500))
+          (is (= 7 (get-in (edn/read-string (note "turn" (git "rev-parse" "proj/s/s3"))) [:usage :output_tokens]))))))))
+
+(deftest stop-sums-a-long-turn
+  (testing "a turn longer than the 256 KB the hook looks at first: all its messages are summed, not those of the last 256 KB"
+    (fs/delete-tree race-scratch)
+    (let [proj (git-init (fs/path race-scratch "proj")) tr (str (fs/path race-scratch "s1.jsonl"))
+          big {"type" "user" "timestamp" (t "03.000") "message" {"content" [{"type" "tool_result" "tool_use_id" "u1" "content" (apply str (repeat 400000 "x"))}]}}]
+      (jsonl! tr [(prompt* "00.000" "do it") (a "01.000" "m1" (use* "u1")) big (a "04.000" "m2" (use* "u2")) (res "05.000" "u2")
+                  (a "06.000" "m3" {"type" "text" "text" "all done"} {"stop_reason" "end_turn" "usage" (usage 7)})])
+      (binding [g/*repo* (str (fs/path race-scratch "traces"))]
+        (ev "prompt" {"session_id" "s4" "cwd" proj "prompt" "do it" "transcript_path" tr})
+        (ev "stop" {"session_id" "s4" "cwd" proj "transcript_path" tr "prompt_id" "p-00.000" "last_assistant_message" "all done"})
+        (let [n (edn/read-string (note "turn" (git "rev-parse" "proj/s/s4")))]
+          (is (= 3 (:assistant-messages n)))
+          (is (= 17 (get-in n [:usage :output_tokens])) "m1 5 + m2 5 + m3 7; the old window held m2 and m3 only"))))))
