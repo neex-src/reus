@@ -474,3 +474,11 @@
       (t (fs/path claude "projects" "-p" "lost2.jsonl") (* 5 m))
       (spit (str (fs/path claude "settings.json")) "{}")
       (is (empty? (health/unrecorded)) "the hook is off (trace:off): nothing is missed"))))
+
+(deftest project-names-are-valid-ref-components
+  (testing "a dir under the projects root that starts with a dot (~/projects/.claude) names refs git accepts"
+    (doseq [[in out] [[".claude" "_claude"] ["reus" "reus"] ["a..b" "a_b"] ["x.lock" "x_lock"] ["end." "end_"]
+                      ["sp ace" "sp_ace"] ["" "_"]]]
+      (is (= out (disk/project-name in)) in)
+      (is (zero? (:exit (p/sh "git" "check-ref-format" (str "refs/heads/" (disk/project-name in) "/main"))))
+          (str "ref of " (pr-str in))))))
