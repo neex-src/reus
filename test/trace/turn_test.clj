@@ -211,3 +211,17 @@
           (ev "stop" {"session_id" "s3" "cwd" proj "transcript_path" tr "prompt_id" "p-00.000" "last_assistant_message" "all done"})
           (is (< (- (System/currentTimeMillis) t0) 2500))
           (is (= 7 (get-in (edn/read-string (note "turn" (git "rev-parse" "proj/s/s3"))) [:usage :output_tokens]))))))))
+
+(deftest stop-sums-a-long-turn
+  (testing "a turn longer than the 256 KB the hook looks at first: all its messages are summed, not those of the last 256 KB"
+    (fs/delete-tree race-scratch)
+    (let [proj (git-init (fs/path race-scratch "proj")) tr (str (fs/path race-scratch "s1.jsonl"))
+          big {"type" "user" "timestamp" (t "03.000") "message" {"content" [{"type" "tool_result" "tool_use_id" "u1" "content" (apply str (repeat 400000 "x"))}]}}]
+      (jsonl! tr [(prompt* "00.000" "do it") (a "01.000" "m1" (use* "u1")) big (a "04.000" "m2" (use* "u2")) (res "05.000" "u2")
+                  (a "06.000" "m3" {"type" "text" "text" "all done"} {"stop_reason" "end_turn" "usage" (usage 7)})])
+      (binding [g/*repo* (str (fs/path race-scratch "traces"))]
+        (ev "prompt" {"session_id" "s4" "cwd" proj "prompt" "do it" "transcript_path" tr})
+        (ev "stop" {"session_id" "s4" "cwd" proj "transcript_path" tr "prompt_id" "p-00.000" "last_assistant_message" "all done"})
+        (let [n (edn/read-string (note "turn" (git "rev-parse" "proj/s/s4")))]
+          (is (= 3 (:assistant-messages n)))
+          (is (= 17 (get-in n [:usage :output_tokens])) "m1 5 + m2 5 + m3 7; the old window held m2 and m3 only"))))))

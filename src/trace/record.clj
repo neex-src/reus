@@ -525,6 +525,11 @@
 
 (def ^:private windows [(* 256 1024) (* 8 1024 1024)])
 
+(def ^:private stop-windows
+  "Bytes read from the end of the transcript to find the start of a turn: a long turn (hours of agent work) is
+  megabytes; its tokens were summed over the last 256 KB only, a tenth of the turn or less."
+  [(* 256 1024) (* 8 1024 1024) (* 64 1024 1024)])
+
 (def stop-wait-ms
   "How long the worker waits for the end of a turn to reach the transcript (see stop-turn)."
   3000)
@@ -538,14 +543,16 @@
   the Stop hook: its tokens, the most of a call, were lost for good, 553 out of 2084). Then the turn
   that the payload's prompt_id opened is read from the file as it is now, up to the next prompt, and
   waited for up to stop-wait-ms (in the worker; the hook never waits). If the message does not turn
-  up, the turn as it is now still holds at least what the hook-time one did."
+  up, the turn as it is now still holds at least what the hook-time one did. Either way the turn is
+  read from its own prompt (widening the window: stop-windows), however long it was."
   [file {:strs [last_assistant_message prompt_id]} obs]
-  (let [at-hook (tail-index file (first windows) (:tsize obs))
+  (let [with-prompt (fn [size] (some #(let [ix (tail-index file % size)] (when (turn/stop-of ix prompt_id) ix)) stop-windows))
+        at-hook (or (when prompt_id (with-prompt (:tsize obs))) (tail-index file (first windows) (:tsize obs)))
         want (not-blank last_assistant_message)
-        now (fn [] (some #(let [ix (tail-index file %)] (when (turn/stop-of ix prompt_id) ix)) windows))
+        now (fn [] (with-prompt nil))
         ok? (fn [ix] (same-text? want (turn/last-text-of ix prompt_id)))]
     (if (or (nil? want) (nil? prompt_id) (same-text? want (turn/last-text-of at-hook prompt_id)))
-      (turn/stop at-hook)
+      (or (when prompt_id (turn/stop-of at-hook prompt_id)) (turn/stop at-hook))
       (let [deadline (+ (System/currentTimeMillis) stop-wait-ms)]
         (loop []
           (let [ix (now)]
