@@ -630,7 +630,7 @@
           {:status 200 :headers {"content-type" "application/json" "cache-control" "no-store"}
            :body (json/generate-string {:tips own :live (sort (live-in tips ms)) :latest (last (session-ids tips ms))})})
 
-        (#{"/static/app.css" "/static/app.js" "/static/shell.js" "/static/mirror.css"} uri)
+        (#{"/static/app.css" "/static/app.js" "/static/shell.js"} uri)
         {:status 200
          :headers {"content-type" (if (str/ends-with? uri ".css") "text/css" "text/javascript") "cache-control" "no-store"}
          :body (slurp (io/resource (str "trace/" (fs/file-name uri))))}

@@ -14,13 +14,13 @@
                                    the same. Only generate.edn, usage-N.edn and context/universal.json are read.
 
   Everything else is read from the trace repo (trace.read), nothing here is on the recording path. The page is
-  self-contained (no scripts, no fonts from elsewhere, no scroll areas of its own): it is filmed in a box with no
+  self-contained (trace.page: no scripts, no fonts from elsewhere, no scroll areas of its own): it is filmed in a box with no
   business reaching the internet. Cost: trace.runs/cost, list price; with the CLI's numbers, the CLI's cost."
   (:require [babashka.fs :as fs]
             [clojure.edn :as edn]
             [clojure.string :as str]
-            [hiccup2.core :as h]
             [trace.git :as g :refer [git]]
+            [trace.page :as pg :refer [thou clip]]
             [trace.read :as r]
             [trace.runs :as runs])
   (:import [java.net URLEncoder]
@@ -116,43 +116,12 @@
 
 ;; --- the page ---------------------------------------------------------------------------------
 
-(defn- thou [n] (if n (str/replace (str n) #"\B(?=(\d{3})+(?!\d))" ",") "–"))
 (defn- usd [x] (cond (nil? x) "–" (< x 0.01) (format "$%.4f" (double x)) :else (format "$%.3f" (double x))))
 (defn- stamp [secs]
   (when secs (.format (DateTimeFormatter/ofPattern "yyyy-MM-dd HH:mm") (.atZone (Instant/ofEpochSecond secs) (ZoneId/systemDefault)))))
-(defn- clip [s n] (let [s (str/replace (str s) #"\s+" " ")] (if (> (count s) n) (str (subs s 0 n) "…") s)))
 (defn- model-name [m] (some-> m (str/replace #"^claude-" "")))
 
-(def ^:private css
-  "body{margin:0;font:16px/1.5 system-ui,-apple-system,'Segoe UI',sans-serif;color:#1b1f24;background:#f6f7f9}
-header.top{background:#1b1f24;color:#fff;padding:10px 24px;display:flex;gap:20px;align-items:baseline}
-header.top a{color:#cfd6df;text-decoration:none}header.top a.brand{color:#fff;font-weight:600}
-main{max-width:60rem;margin:0 auto;padding:24px 24px 64px}
-h1{font-size:1.5rem;margin:.2em 0 .1em}h2{font-size:1.1rem;margin:2em 0 .4em;border-bottom:1px solid #d5dae1;padding-bottom:.2em}
-.lede{font-size:1.15rem;margin:.4em 0 1em}
-.nums{display:flex;flex-wrap:wrap;gap:12px;margin:12px 0}
-.num{background:#fff;border:1px solid #d5dae1;border-radius:8px;padding:10px 16px;min-width:8.5rem}
-.num b{display:block;font-size:1.6rem;line-height:1.2}.num span{color:#59636e;font-size:.85rem}
-table{border-collapse:collapse;width:100%;background:#fff;border:1px solid #d5dae1}
-th,td{text-align:left;padding:6px 10px;border-bottom:1px solid #e6e9ee;vertical-align:top}th{background:#eef1f5;font-weight:600}
-td.n,th.n{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
-pre{white-space:pre-wrap;word-break:break-word;background:#fff;border:1px solid #d5dae1;border-radius:6px;padding:10px 12px;margin:.4em 0;font:13px/1.45 ui-monospace,Menlo,Consolas,monospace}
-.quote{background:#fff;border-left:4px solid #3b6fd4;padding:8px 14px;margin:.4em 0;white-space:pre-wrap}
-.muted{color:#59636e}.ok{color:#17803d}.bad{color:#b42318}
-ol.steps{margin:.3em 0;padding-left:1.4em}ol.steps li{margin:.15em 0}
-code{font:13px ui-monospace,Menlo,Consolas,monospace}
-details summary{cursor:pointer;color:#3b6fd4}
-.src{color:#59636e;font-size:.85rem;margin-top:2.5em}")
-
-(defn- shell [title body]
-  (str "<!doctype html>"
-       (h/html
-        [:html {:lang "en"}
-         [:head [:meta {:charset "utf-8"}] [:meta {:name "viewport" :content "width=device-width, initial-scale=1"}]
-          [:title title] [:style (h/raw css)]]
-         [:body
-          [:header.top [:a.brand {:href "/"} "reus trace"] [:a {:href "/calls"} "Model calls"] [:a {:href "/runs"} "Runs"]]
-          [:main body]]])))
+(defn- shell [title body] (pg/shell title body :current :calls))
 
 (defn- num [big small] [:div.num [:b big] [:span small]])
 
