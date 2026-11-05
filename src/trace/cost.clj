@@ -248,7 +248,8 @@
                 [0 0 0 []] (str/split-lines out))]
     {:commits commits :added added :deleted deleted :days (vec (sort (distinct days)))
      :first (first (sort days)) :last (last (sort days))
-     :by-day (frequencies days)}))
+     :by-day (frequencies days)
+     :busiest-day (when (seq days) (let [[d n] (apply max-key val (frequencies days))] {:day d :commits n}))}))
 
 ;; --- the result --------------------------------------------------------------------------------------
 
@@ -303,6 +304,31 @@
      :commits-on-days-with-no-recorded-session (reduce + (map val (remove #(contains? dayset (key %)) by-day)))
      :days-with-commits-and-no-session (count (remove dayset (keys by-day)))}))
 
+(defn- usd [x] (format "$%,.0f" (double x)))
+
+(defn caveats
+  "What no source has, in words, from the numbers of a result: nothing here is typed."
+  [{:keys [projects total elsewhere cli-check]}]
+  (vec
+   (concat
+    (for [[n p] projects :when (and (:counted? p) (pos? (get-in p [:not-recorded :commits-before-first-recorded-day] 0)))]
+      (str n ": " (get-in p [:not-recorded :commits-before-first-recorded-day]) " git commits dated before the first day any transcript or trace has a message from it ("
+           (:first-day p) "): that work has no record at all"))
+    (for [[n p] projects :when (and (:counted? p) (pos? (get-in p [:not-recorded :days-with-commits-and-no-session] 0)))]
+      (str n ": commits on " (get-in p [:not-recorded :days-with-commits-and-no-session]) " days with no recorded session ("
+           (get-in p [:not-recorded :commits-on-days-with-no-recorded-session]) " commits): hand work, or sessions neither source has"))
+    (for [[n p] projects :when (and (:counted? p) (get-in p [:git :busiest-day]))
+          :let [b (get-in p [:git :busiest-day])] :when (> (:commits b) (* 0.25 (get-in p [:git :commits])))]
+      (str n ": " (:commits b) " of its " (get-in p [:git :commits]) " commits are dated " (:day b) " (one day): the commit count says little about effort"))
+    [(str "The messages in the transcripts add up to " (format "%.0f%%" (* 100.0 (:messages-share cli-check)))
+          " of the cost the CLI itself recorded (cost-state) for the same " (:sessions cli-check) " sessions: " (usd (:cli-usd cli-check))
+          " against " (usd (:messages-usd cli-check)) ". The rest is requests no transcript line holds (context compaction, side requests); the numbers below are the messages, a floor.")
+     (str "Sessions started in the folder above all projects, and their messages that no project cwd and no recorded agent run places: "
+          (usd (:cost-usd elsewhere)) " at list price, " (:prompts elsewhere) " prompts. They are NOT in any project row nor in the total: the orchestrating of this work is in there.")
+     "Cost is the recorded tokens at list price, per model, the cache write at its own 5-minute or 1-hour rate. The work ran on a subscription: nobody was invoiced this."
+     "Prices of sonnet-5-5, opus-5-5 and haiku-5-5 equal the CLI's own cost to the cent on sessions whose messages are all there; fable-5-1 and the older rows are not checked that way."
+     "Work outside Claude Code (hand edits, other tools, other machines than the host and the sandbox box) is in neither source."])))
+
 (defn count-all
   "The result map for a method (see ns)."
   [method]
@@ -339,8 +365,9 @@
         counted (filter :counted? (vals rows))
         total (fn [k] (reduce + (map k counted)))
         by-model (apply merge-with (fn [a b] (merge-with #(+ (or %1 0) (or %2 0)) a b)) (map #(into {} (map (fn [[m x]] [m (select-keys x [:messages :out :in-fresh :cache-read :cache-write :cache-write-1h :cost-usd])])) (:by-model %)) counted))]
-    {:generated (str (Instant/now)) :method method
+    (as-> {:generated (str (Instant/now)) :method method
      :projects rows
+     :attached (:attach method)
      :total {:projects (vec (keep (fn [[k v]] (when (:counted? v) k)) rows))
              :sessions (total :sessions) :agent-runs (total :agent-runs) :prompts (total :prompts) :tool-calls (total :tool-calls)
              :messages (total :messages) :cost-usd (total :cost-usd) :by-model (into (sorted-map) by-model)
@@ -354,7 +381,7 @@
      :cli-check (let [ks (filter #(pos? (get-in t [:cli %] 0.0)) (keys (:cli t)))
                       cli (reduce + (map #(get-in t [:cli %]) ks)) mine (reduce + (map #(get-in t [:mine %] 0.0) ks))]
                   {:what "sessions whose transcript carries the CLI's own cost-state: its total, and what the messages of the session (subagent runs too) add up to at the same prices"
-                   :sessions (count ks) :cli-usd cli :messages-usd mine :messages-share (when (pos? cli) (/ mine cli))})}))
+                   :sessions (count ks) :cli-usd cli :messages-usd mine :messages-share (when (pos? cli) (/ mine cli))})} res (assoc res :caveats (caveats res)))))
 
 ;; --- command line ------------------------------------------------------------------------------------
 
