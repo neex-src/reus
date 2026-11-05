@@ -4,6 +4,7 @@
 
     bb trace:cost --method FILE [--out FILE]    count, as FILE says (an edn map, see below), write the result
     bb trace:cost --from RESULT [--out FILE]    count again with the :method a result carries
+    --md FILE                                   also a short human table of the result
 
   Two sources, and the order between them is the point:
   - TRANSCRIPTS (Claude Code's own ~/.claude/projects, the main sessions and their subagent runs) are the
@@ -333,9 +334,9 @@
       (str n ": " (:commits b) " of its " (get-in p [:git :commits]) " commits are dated " (:day b) " (one day): the commit count says little about effort"))
     [(str "The messages in the transcripts add up to " (format "%.0f%%" (* 100.0 (:messages-share cli-check)))
           " of the cost the CLI itself recorded (cost-state) for the same " (:sessions cli-check) " sessions: " (usd (:cli-usd cli-check))
-          " against " (usd (:messages-usd cli-check)) ". The rest is requests no transcript line holds (context compaction, side requests); the numbers below are the messages, a floor.")
+          " against " (usd (:messages-usd cli-check)) ". The difference is in no transcript line (its cause was not measured); the numbers here are the messages, a floor.")
      (str "Sessions started in the folder above all projects, and their messages that no project cwd and no recorded agent run places: "
-          (usd (:cost-usd elsewhere)) " at list price, " (:prompts elsewhere) " prompts. They are NOT in any project row nor in the total: the orchestrating of this work is in there.")
+          (usd (:cost-usd elsewhere)) " at list price, " (:prompts elsewhere) " prompts. They are NOT in any project row nor in the total.")
      "Cost is the recorded tokens at list price, per model, the cache write at its own 5-minute or 1-hour rate. The work ran on a subscription: nobody was invoiced this."
      "Prices of sonnet-5-5, opus-5-5 and haiku-5-5 equal the CLI's own cost to the cent on sessions whose messages are all there; fable-5-1 and the older rows are not checked that way."
      "Work outside Claude Code (hand edits, other tools, other machines than the host and the sandbox box) is in neither source."])))
@@ -394,6 +395,26 @@
                   {:what "sessions whose transcript carries the CLI's own cost-state: its total, and what the messages of the session (subagent runs too) add up to at the same prices"
                    :sessions (count ks) :cli-usd cli :messages-usd mine :messages-share (when (pos? cli) (/ mine cli))})} res (assoc res :caveats (caveats res)))))
 
+(defn- thousands [n] (str/replace (str (long n)) #"\B(?=(\d{3})+(?!\d))" ","))
+(defn- mtok [n] (format "%.1f M" (/ (double n) 1e6)))
+
+(defn markdown
+  "A short human table of a result: per project, per model, the calls, what no source has."
+  [{:keys [projects total caveats generate-calls elsewhere]}]
+  (str "# What building cost (reus, from transcripts and traces)\n\n"
+       "Tokens at list price, counted from what Claude Code and reus recorded. Not an invoice: the work ran on a subscription.\n\n"
+       "| project | sessions | agent runs | prompts | tool calls | tokens in | tokens out | list price | days | commits | lines +/- |\n|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n"
+       (apply str (for [[n p] projects :when (:counted? p)]
+                    (format "| %s | %d | %d | %d | %s | %s | %s | $%s | %d | %d | +%s / -%s |\n" n (:sessions p) (:agent-runs p) (:prompts p) (thousands (:tool-calls p))
+                            (mtok (get-in p [:tokens :in-total])) (mtok (get-in p [:tokens :out])) (thousands (:cost-usd p)) (:days p)
+                            (get-in p [:git :commits]) (thousands (get-in p [:git :added])) (thousands (get-in p [:git :deleted])))))
+       (format "| **all** | %d | %d | %d | %s |  |  | **$%s** |  | %d |  |\n\n" (:sessions total) (:agent-runs total) (:prompts total) (thousands (:tool-calls total)) (thousands (:cost-usd total)) (:commits total))
+       "## By model\n\n| model | messages | tokens out | list price |\n|---|---:|---:|---:|\n"
+       (apply str (for [[m x] (:by-model total)] (format "| %s | %s | %s | $%s |\n" m (thousands (:messages x)) (thousands (:out x)) (thousands (:cost-usd x)))))
+       "\n## One model call, as the CLI reported it\n\n| model | tokens in | tokens out | cost | seconds |\n|---|---:|---:|---:|---:|\n"
+       (apply str (for [g generate-calls] (format "| %s | %s | %s | $%.4f | %.0f |\n" (:model g) (thousands (:tokens-in g)) (thousands (:tokens-out g)) (:cost-usd g) (:seconds g))))
+       "\n## What neither source has\n\n" (apply str (for [c caveats] (str "- " c "\n")))))
+
 ;; --- command line ------------------------------------------------------------------------------------
 
 (defn -main [& args]
@@ -403,4 +424,5 @@
                      :else (do (println "usage: bb trace:cost --method FILE | --from RESULT [--out FILE]") (System/exit 2)))
         res (count-all method)
         text (with-out-str (pp/pprint res))]
+    (when (:md opts) (spit (:md opts) (markdown res)))
     (if (:out opts) (spit (:out opts) text) (print text))))
