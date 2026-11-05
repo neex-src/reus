@@ -525,10 +525,39 @@
 
 (def ^:private windows [(* 256 1024) (* 8 1024 1024)])
 
+(def stop-wait-ms
+  "How long the worker waits for the end of a turn to reach the transcript (see stop-turn)."
+  3000)
+
+(defn- same-text? [a b] (= (str/replace (str/trim (str a)) #"\s+" " ") (str/replace (str/trim (str b)) #"\s+" " ")))
+
+(defn- stop-turn
+  "The turn a Stop ends, read as the transcript was when its hook fired (a new prompt may have come
+  since). Except when the payload's last_assistant_message is not that transcript's last text of the
+  turn: Claude Code had not written the end of the turn yet (`claude -p` flushes the last message after
+  the Stop hook: its tokens, the most of a call, were lost for good, 553 out of 2084). Then the turn
+  that the payload's prompt_id opened is read from the file as it is now, up to the next prompt, and
+  waited for up to stop-wait-ms (in the worker; the hook never waits). If the message does not turn
+  up, the turn as it is now still holds at least what the hook-time one did."
+  [file {:strs [last_assistant_message prompt_id]} obs]
+  (let [at-hook (tail-index file (first windows) (:tsize obs))
+        want (not-blank last_assistant_message)
+        now (fn [] (some #(let [ix (tail-index file %)] (when (turn/stop-of ix prompt_id) ix)) windows))
+        ok? (fn [ix] (same-text? want (turn/last-text-of ix prompt_id)))]
+    (if (or (nil? want) (nil? prompt_id) (same-text? want (turn/last-text-of at-hook prompt_id)))
+      (turn/stop at-hook)
+      (let [deadline (+ (System/currentTimeMillis) stop-wait-ms)]
+        (loop []
+          (let [ix (now)]
+            (cond (and ix (ok? ix)) (turn/stop-of ix prompt_id)
+                  (< (System/currentTimeMillis) deadline) (do (Thread/sleep 100) (recur))
+                  ix (turn/stop-of ix prompt_id)
+                  :else (turn/stop at-hook))))))))
+
 (defn- live-turn
   "What the transcript adds to an event (trace.turn), from its tail; nil when it is not there. A
-  stop is read as the transcript was when its hook fired (a new prompt may have come since). A tool
-  call whose tool_use is not there yet is {:pending-id id}, found at a later event."
+  stop is read as the transcript was when its hook fired (a new prompt may have come since), see
+  stop-turn. A tool call whose tool_use is not there yet is {:pending-id id}, found at a later event."
   [event {:strs [tool_use_id prompt] :as input} obs]
   (try
     (let [file (transcript-of input)]
@@ -538,7 +567,7 @@
                      {:use-found? false :pending-id tool_use_id})
           "prompt" (let [ix (tail-index file (first windows))]
                      (some->> (turn/find-prompt ix prompt) (turn/prompt ix)))
-          "stop" (turn/stop (tail-index file (first windows) (:tsize obs)))
+          "stop" (stop-turn file input obs)
           nil)))
     (catch Throwable _ nil)))
 

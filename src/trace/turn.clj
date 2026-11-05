@@ -71,8 +71,13 @@
 (defn- between [s lo hi] (subseq s > lo < hi))
 
 (def ^:private usage-keys ["input_tokens" "output_tokens" "cache_creation_input_tokens" "cache_read_input_tokens"])
-(defn- usage-of [e]
-  (when-let [u (get-in e ["message" "usage"])] (into {} (keep (fn [k] (when-let [v (get u k)] [(keyword k) v]))) usage-keys)))
+(defn- usage-of
+  "The four token counts of an assistant line, and :cache_1h_input_tokens, the part of the cache write that
+  went to the 1-hour cache (priced at 2x input, the 5-minute one at 1.25x) when the line says."
+  [e]
+  (when-let [u (get-in e ["message" "usage"])]
+    (cond-> (into {} (keep (fn [k] (when-let [v (get u k)] [(keyword k) v]))) usage-keys)
+      (get-in u ["cache_creation" "ephemeral_1h_input_tokens"]) (assoc :cache_1h_input_tokens (get-in u ["cache_creation" "ephemeral_1h_input_tokens"])))))
 
 (defn- message-usage
   "The usage of a message: from its last line."
@@ -183,3 +188,23 @@
            (let [t (str/join "\n" (keep (fn [b] (when (= "text" (get b "type")) (get b "text"))) (blocks %)))]
              (when-not (str/blank? t) t)))
         (rseq (vec entries))))
+
+(defn- turn-end
+  "[index-of-the-prompt end]: the prompt entry that carries promptId, and where the next prompt starts (or the end)."
+  [{:keys [entries prompts] :as ix} prompt-id]
+  (when-let [i (and prompt-id (some #(when (= prompt-id (get (entries %) "promptId")) %) prompts))]
+    [i (or (after prompts i) (count entries))]))
+
+(defn stop-of
+  "The stop (see `stop`) of the turn that the prompt with this promptId opened, in the entries as they are
+  now: it ends before the next prompt. nil when no prompt has that id."
+  [{:keys [entries durations] :as ix} prompt-id]
+  (when-let [[i end] (turn-end ix prompt-id)]
+    (let [te (some-> (last (between durations i end)) entries)] ; written after the Stop hooks, inside the turn in a whole file
+      (cond-> (stop ix end)
+        te (assoc :duration-ms (get te "durationMs") :message-count (get te "messageCount"))))))
+
+(defn last-text-of
+  "The last assistant text of the turn that the prompt with this promptId opened; nil for none."
+  [{:keys [entries] :as ix} prompt-id]
+  (when-let [[i end] (turn-end ix prompt-id)] (last-text (subvec entries (inc i) end))))

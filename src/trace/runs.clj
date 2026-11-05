@@ -41,12 +41,18 @@
    "claude-opus-4-8" {:in 5.00 :out 25.00 :cr 0.50 :cw 6.25}})
 
 (defn cost
-  "USD of a turn {:model :usage}, nil when the model has no price."
+  "USD of a turn {:model :usage}, nil when the model has no price. A cache write is priced at 1.25x the
+  input price (the 5-minute cache), the part the usage says went to the 1-hour cache
+  (:cache_1h_input_tokens, which Claude Code uses) at 2x: with it the number is the CLI's own
+  `total_cost_usd`."
   [{:keys [model usage]}]
   (when-let [pr (get prices model)]
-    (/ (+ (* (:in pr) (or (:input_tokens usage) 0)) (* (:out pr) (or (:output_tokens usage) 0))
-          (* (:cr pr) (or (:cache_read_input_tokens usage) 0)) (* (:cw pr) (or (:cache_creation_input_tokens usage) 0)))
-       1e6)))
+    (let [cw (or (:cache_creation_input_tokens usage) 0)
+          h (min cw (or (:cache_1h_input_tokens usage) 0))]
+      (/ (+ (* (:in pr) (or (:input_tokens usage) 0)) (* (:out pr) (or (:output_tokens usage) 0))
+            (* (:cr pr) (or (:cache_read_input_tokens usage) 0))
+            (* (:cw pr) (- cw h)) (* 2 (:in pr) h))
+         1e6))))
 
 (defn- usd [x] (if x (if (< x 0.01) (format "$%.4f" x) (format "$%.3f" x)) "–"))
 (defn- thou [n] (if n (let [s (str n)] (str/replace s #"\B(?=(\d{3})+(?!\d))" ",")) "–"))
