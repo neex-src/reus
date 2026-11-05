@@ -9,8 +9,10 @@
   - TRANSCRIPTS (Claude Code's own ~/.claude/projects, the main sessions and their subagent runs) are the
     primary source: every message with its model, its cwd and its usage, the cache write split into the
     5-minute and the 1-hour part, so the cost at list price is exact (trace.runs/cost, the CLI's own figure).
-    A message belongs to the project its own cwd is in; a message in no project (a session started in the
-    folder above all of them) is counted apart as :elsewhere, never into a project. Message ids are counted once.
+    A message belongs to the project its own cwd is in; a message of a subagent run with no project cwd belongs to
+    the project reus's trace branch of that same run was recorded in; any other message in no project (a session
+    started in the folder above all of them) is counted apart as :elsewhere, never into a project. Message ids
+    are counted once.
   - TRACES (reus's repos) are the cross-check and fill in what no transcript has: per branch (session or
     agent run) the prompt, response and tool commits with their Model and Tokens trailers; a branch belongs
     to the project its root folder is in. :gap says, per project, how much of the transcripts' tokens the
@@ -108,7 +110,7 @@
 
 (defn- add-file
   "Fold a scanned transcript into acc; a message id seen before (a resumed session copies its past) is skipped."
-  [acc {:keys [session agent msgs prompts cost-state]} projects z]
+  [acc {:keys [session agent msgs prompts cost-state]} projects z agent-proj]
   (let [skey (str (subs session 0 (min 8 (count session))) (when agent (str "-" agent)))
         acc (cond-> (update acc :files inc) cost-state (assoc-in [:cli session] cost-state))
         acc (update-in acc [:mine session] (fnil + 0.0)
@@ -117,7 +119,7 @@
              (fn [acc [id {:keys [ts cwd model usage tools]}]]
                (if (or (contains? (:seen acc) id) (= "<synthetic>" model))
                  acc
-                 (let [u (usage-map usage) pr (project-of projects cwd) day (when ts (day-of-ts ts z))]
+                 (let [u (usage-map usage) pr (or (project-of projects cwd) (when agent (get agent-proj skey))) day (when ts (day-of-ts ts z))]
                    (cond-> (update acc :seen conj id)
                      (nil? pr) (update :elsewhere (fn [e] (-> e (update :by-model update model tally u) (update :tool-calls (fnil + 0) (count tools)))))
                      pr (update-in [:projects pr] (fn [pj]
@@ -132,11 +134,17 @@
                      pr (update-in [:sess [skey pr]] (fn [s] (-> (or s {:agent? (boolean agent)}) (update :tally add-tally {:messages 1 :usage u}))))))))
              acc msgs)]
     (reduce (fn [acc {:keys [ts cwd]}]
-              (if-let [pr (project-of projects cwd)]
+              (if-let [pr (or (project-of projects cwd) (when agent (get agent-proj skey)))]
                 (-> acc (update-in [:projects pr :prompts] (fnil inc 0)) (update-in [:projects pr :days] (fnil conj #{}) (day-of-ts ts z))
                     (update-in [:sess [skey pr] :prompts] (fnil inc 0)))
                 (update-in acc [:elsewhere :prompts] (fnil inc 0))))
             acc prompts)))
+
+(defn- agent-key
+  "<session8>-<agent id> of a subagent transcript's path, the key of its trace branch; nil for a main session."
+  [f]
+  (when (jr/agent-file? f)
+    (str (subs (str (fs/file-name (fs/parent (fs/parent f)))) 0 8) "-" (str/replace (str (fs/strip-ext (fs/file-name f))) #"^agent-" ""))))
 
 (defn- relevant?
   "Does any line of the transcript have a cwd in one of the roots? (the quick look before the real parse)"
@@ -147,10 +155,10 @@
 (defn scan-transcripts
   "Fold every transcript under the given project folders (main sessions and subagent runs) that has a message
   in a project's roots."
-  [dirs projects z]
+  [dirs projects z & [agent-proj]]
   (let [needles (vec (for [[_ {:keys [roots]}] projects r roots] (str "\"cwd\":\"" r)))
-        files (->> dirs (mapcat #(fs/glob % "**.jsonl")) (map str) sort (filter #(relevant? % needles)))]
-    (reduce (fn [acc f] (try (add-file acc (scan-file f) projects z)
+        files (->> dirs (mapcat #(fs/glob % "**.jsonl")) (map str) sort (filter #(or (contains? agent-proj (agent-key %)) (relevant? % needles))))]
+    (reduce (fn [acc f] (try (add-file acc (scan-file f) projects z agent-proj)
                              (catch Exception e (binding [*out* *err*] (println "skip" f (ex-message e))) acc)))
             (fresh-acc) files)))
 
@@ -299,9 +307,12 @@
   "The result map for a method (see ns)."
   [method]
   (let [z (zone method) projects (:projects method)
-        t (scan-transcripts (:transcripts method) projects z)
-        stores (for [s (:traces method)] (assoc (scan-traces (:repo s) projects z) :name (:name s)))
+        stores (doall (for [s (:traces method)] (assoc (scan-traces (:repo s) projects z) :name (:name s))))
         ssess (apply merge (map :sess stores))
+        ;; a subagent run whose messages carry no project cwd (its session was started in the folder above all of
+        ;; them) belongs to the project reus saw it work in: the trace branch of the same run
+        agent-proj (into {} (keep (fn [[[skey pr] s]] (when (:agent? s) [skey pr])) ssess))
+        t (scan-transcripts (:transcripts method) projects z agent-proj)
         rows (into (sorted-map)
                    (for [[pr cfg] projects]
                      (let [row (project-row (get-in t [:projects pr] {}) z)
