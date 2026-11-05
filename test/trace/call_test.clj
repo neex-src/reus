@@ -80,7 +80,7 @@
           (is (str/includes? body "2,364"))
           (is (str/includes? body "$0.0044"))
           (is (str/includes? body "Send an order to the inbox, wait until it is acked, check that service A logged it."))
-          (is (str/includes? body "universal.json"))
+          (is (str/includes? body "<code>universal.json, lines 0 to 100</code>") "paths are the model's: relative to the folder it was in")
           (is (str/includes? body "<b>2</b> steps"))
           (is (str/includes? body "dynamodb get table/messages order-acked"))
           (is (not (re-find #"<script|https?://(?!127)" body)) "self-contained")))

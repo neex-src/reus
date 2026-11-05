@@ -47,16 +47,21 @@
                     (when (= session (:session-id u)) (assoc u :file (str f)))))
           (sort (fs/glob run-dir "usage-*.edn")))))
 
-(defn- rel [cwd p]
-  (let [p (str p)] (if (and cwd (str/starts-with? p (str cwd "/"))) (subs p (inc (count cwd))) p)))
+(defn- rel
+  "p relative to the session's cwd: trace.read already made commands relative to the session's root, so the
+  cwd is tried as it is and as it is below the root."
+  [{:keys [cwd root]} p]
+  (let [p (str p)
+        crel (when (and cwd root (str/starts-with? cwd (str root "/"))) (subs cwd (inc (count root))))]
+    (or (some #(when (and % (str/starts-with? p (str % "/"))) (subs p (inc (count %)))) [cwd crel]) p)))
 
 (defn- what-it-did
-  "A look of the model in words: [verb detail]."
-  [cwd {:keys [tool input]}]
+  "A look of the model in words: [verb detail]. where: {:cwd :root} of the session."
+  [where {:keys [tool input]}]
   (case tool
-    "Read" ["Read" (str (rel cwd (get input "file_path"))
+    "Read" ["Read" (str (rel where (get input "file_path"))
                         (when-let [o (get input "offset")] (str ", lines " o " to " (+ o (or (get input "limit") 0)))))]
-    "Grep" ["Searched" (str (rel cwd (or (get input "path") ".")) " for “" (get input "pattern") "”")]
+    "Grep" ["Searched" (str (rel where (or (get input "path") ".")) " for “" (get input "pattern") "”")]
     "Glob" ["Listed files" (str (get input "pattern"))]
     [(str tool) (str/join ", " (map (fn [[k v]] (str k " " v)) input))]))
 
@@ -93,7 +98,7 @@
        :task (some-> (:prompt d) str/split-lines first)
        :prose (prose-of (:prompt d))
        :universal-bytes universal
-       :looked (mapv (fn [s] (let [[verb detail] (what-it-did (:cwd d) (:call s))]
+       :looked (mapv (fn [s] (let [[verb detail] (what-it-did (select-keys d [:cwd :root]) (:call s))]
                                {:verb verb :detail detail :lines (:lines s) :silent (:silent s) :err (:err s)
                                 :ms (some-> (get-in s [:trailers "Duration-Ms"]) parse-long)}))
                      steps)
@@ -168,8 +173,8 @@ details summary{cursor:pointer;color:#3b6fd4}
       (if-not (and usage done?)
         [:p.lede "This call is not finished yet, or reus did not see its end."]
         [:p.lede "The software sent " [:b mname] " a request of " [:b (thou total-in)] " tokens "
-         "(" (thou cread) " of them re-used from its cache, so they cost almost nothing), it looked at "
-         [:b (count looked)] (if (= 1 (count looked)) " file" " files") " and wrote back " [:b (thou out)] " tokens. "
+         "(" (thou cread) " of them re-used from its cache, so they cost almost nothing), it looked things up "
+         [:b (count looked)] (if (= 1 (count looked)) " time" " times") " and wrote back " [:b (thou out)] " tokens. "
          "That cost " [:b (usd cost*)] (when secs* (list " and took " [:b (format "%.0f" (double secs*))] (if (< (Math/round (double secs*)) 2) " second" " seconds"))) "."])
       [:div.nums
        (num (thou total-in) "tokens in (everything the model read)")
@@ -199,7 +204,7 @@ details summary{cursor:pointer;color:#3b6fd4}
              [:td.n (cond (:err s) [:span.bad "an error"] (:silent s) "nothing" (:lines s) (str (thou (:lines s)) (if (= 1 (:lines s)) " line" " lines")) :else "–")]
              [:td.n (if (:ms s) (str (:ms s) " ms") "–")]])]]
         [:p.muted "It answered without looking at anything."])
-      (when rounds [:p.muted "It went back to the model " rounds " times in all: each look, then the answer."])
+      (when rounds [:p.muted "The software and the model talked in " rounds " rounds: the looks above, then the answer."])
       [:h2 "3. What came back"]
       (if reply
         (list
