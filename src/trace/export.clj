@@ -387,7 +387,7 @@ table.tr th{width:9rem;background:none;font:12px ui-monospace,Menlo,Consolas,mon
             "The message says which tool ran and what it cost; what the model said and the raw tool call hang on the commit as git notes. "
             "A subagent's report does not come back as a git merge: the next prompt of the session carries it, and the end-of-turn commit names the agent's last commit in an " [:code "Agent-Report"] " trailer."]
            [:h2 "What was left out"]
-           [:p "Every commit carries a snapshot of the author's instruction files and of the project's memory files (the .claude-trace folder of every commit). None of it is in these pages; only the number of files in each tree is."
+           [:p "Every commit carries a snapshot of the author's instruction files and, where the project has them, of its memory files (the .claude-trace folder of every commit). None of it is in these pages; only the number of files in each tree is."
             (if (seq cuts)
               (list " " (str (reduce + 0 (vals cuts)) " pieces of text (counted once each, wherever they occur) were cut out and replaced by a marker: ")
                     (str/join "; " (for [[why n] cuts] (str n " × " why))) ".")
