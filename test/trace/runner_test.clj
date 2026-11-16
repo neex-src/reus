@@ -20,7 +20,9 @@
   (is (= {:arm "fast" :model "gpt-5" :effort nil} (run/parse-arm "fast=gpt-5")))
   (is (= {:arm "default-high" :model nil :effort "high"} (run/parse-arm "default:high")))
   (is (= {:arm "ide-haiku-low" :model "haiku" :effort "low" :engine :ide} (run/parse-arm "ide:haiku:low")))
-  (is (= {:arm "x" :model "auto" :effort nil :engine :ide} (run/parse-arm "x=ide:auto"))))
+  (is (= {:arm "x" :model "auto" :effort nil :engine :ide} (run/parse-arm "x=ide:auto")))
+  (is (= {:arm "claude-haiku" :model "haiku" :effort nil :engine :claude} (run/parse-arm "claude:haiku")))
+  (is (= {:arm "son" :model "sonnet" :effort "high" :engine :claude} (run/parse-arm "son=claude:sonnet:high"))))
 
 (deftest a-task-from-a-folder-and-a-prompts-file
   (fs/delete-tree scratch)
@@ -63,6 +65,30 @@
           (is (fs/exists? (fs/path (:dir res) ".github" "hooks" "reus.json")))
           (is (fs/exists? (fs/path (:dir res) "a.txt")) "a copy of the start folder")
           (is (= 1 (count (str/split-lines (:out (p/shell {:dir (:dir res) :out :string} "git" "log" "--oneline"))))) "one start commit"))))))
+
+(deftest a-claude-arm-starts-claude-p-and-resumes
+  (fs/delete-tree scratch)
+  (let [proj (fs/path scratch "proj") log (str (fs/path scratch "fakec.log"))]
+    (fs/create-dirs proj)
+    (spit (str (fs/path proj "a.txt")) "a")
+    (spit (str (fs/path scratch "p.md")) "one\n---\ntwo\n---\nthree\n")
+    (with-redefs [g/home (str (fs/path scratch "reus"))]
+      (run/make-task! {:task "t3" :start (str proj) :prompts (str (fs/path scratch "p.md"))})
+      (binding [run/*claude-bin* (str (fs/path code "test" "guide" "fake-claude.bb"))]
+        (let [res (with-redefs [p/shell (let [orig p/shell] (fn [opts & args] (apply orig (update opts :extra-env assoc "FAKE_LOG" log) args)))]
+                    (run/run-arm! "t3" (run/parse-arm "h=claude:haiku:low") (fn [_])))
+              calls (map edn/read-string (str/split-lines (slurp log)))
+              at (fn [c k] (second (drop-while (partial not= k) c)))]
+          (is (:ok? res))
+          (is (= 3 (:prompts res)))
+          (is (= ["-p" "one"] (take 2 (first calls))))
+          (is (= ["--session-id" "--resume" "--resume"] (map #(if (some #{"--session-id"} %) "--session-id" "--resume") calls)))
+          (is (= 1 (count (distinct (map #(or (at % "--session-id") (at % "--resume")) calls)))) "one session for every prompt")
+          (is (every? #(some #{"--dangerously-skip-permissions"} %) calls))
+          (is (every? #(= "haiku" (at % "--model")) calls))
+          (is (every? #(= "low" (at % "--effort")) calls))
+          (is (not (fs/exists? (fs/path (:dir res) ".github"))) "no Copilot hooks: Claude's own hooks record it")
+          (is (fs/exists? (fs/path (:dir res) "ok.txt"))))))))
 
 (deftest install-into-a-copilot-home
   (fs/delete-tree scratch)

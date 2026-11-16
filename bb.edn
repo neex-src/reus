@@ -60,7 +60,7 @@
              :requires ([trace.e2e])
              :task (apply trace.e2e/-main *command-line-args*)}
 
-  runs:go {:doc "Run the same prompts on several models/efforts and compare: bb runs:go --task N --prompts DIR|FILE [--start DIR] [--check CMD] --arm [name=]MODEL[:EFFORT] ... [--serial]"
+  runs:go {:doc "Run the same prompts on several models/efforts and compare: bb runs:go --task N --prompts DIR|FILE [--start DIR] [--check CMD] --arm [name=][claude:|ide:]MODEL[:EFFORT] ... [--serial]  (claude: arms run `claude -p`, the others Copilot)"
            :requires ([trace.runner])
            :task (apply trace.runner/-main *command-line-args*)}
 
