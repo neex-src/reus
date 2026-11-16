@@ -25,6 +25,7 @@
     :history `branch`'s first-parent history (or, deleted, the 2nd parent of its
              `Merge <branch>` commit), the last commit made before ts
     :main    the default branch's first-parent history before ts
+    :first   no commit is that old (the folder was made again later): the default branch's oldest
   A move keeps the overlay as `git checkout --detach` keeps uncommitted changes; where git
   would refuse (a changed file differs between the two commits) it is `reset --hard`: the
   overlay of tracked files goes, files git does not track stay.
@@ -175,11 +176,12 @@
 
 (defn- root-of [sh p] (deepest p (keys (:roots @sh))))
 
-(defn- open-root!
-  "The root of the repo orig path p is in, opened on first use."
+(defn- open-origin!
+  "The root of the repo orig path p is in by git (not by the roots opened so far), opened when it is new."
   [sh p]
-  (or (root-of sh p)
-      (when-let [{:keys [orig-root repo common]} (origin sh p)]
+  (when-let [{:keys [orig-root repo common]} (origin sh p)]
+    (if (get-in @sh [:roots orig-root])
+      orig-root
         (let [clean (disk/project-name (fs/file-name orig-root))
               taken (set (map :project (vals (:roots @sh))))
               project (first (remove taken (cons clean (map #(str clean "-" %) (iterate inc 1)))))
@@ -195,9 +197,16 @@
                           (update :cache dissoc :owner))))
           orig-root))))
 
+(defn- open-root!
+  "The root of the repo orig path p is in, opened on first use."
+  [sh p]
+  (or (root-of sh p) (open-origin! sh p)))
+
 (defn open!
-  "Open the root of the repo orig path p is in (so a replay knows its repos up front)."
-  [sh p] (open-root! sh p))
+  "Open the root of the repo orig path p is in (so a replay knows its repos up front): also a repo of its own
+  inside a root opened before (a run's fresh repo under a project's .scratch/), which open-root! would take for
+  a dir of that root."
+  [sh p] (or (open-origin! sh p) (root-of sh p)))
 
 (defn worktree!
   "Note that orig dir wt was a git worktree (a `git worktree add` in a transcript), on
@@ -305,7 +314,10 @@
         (some-> branch (#(or (when (branch-ref? sh repo %) (str "refs/heads/" %))
                              (merged-tip sh repo %)))
                 (#(at (history sh repo %) ts)) second (vector :history))
-        (some-> default (#(at (history sh repo %) ts)) second (vector :main)))))
+        (some-> default (#(at (history sh repo %) ts)) second (vector :main))
+        ;; no commit is older than ts (the folder was made again later, or its first commit came after): the
+        ;; oldest one is closer to then than today's disk is
+        (some-> default (#(first (history sh repo %))) second (vector :first)))))
 
 ;; --- files ----------------------------------------------------------------------------
 

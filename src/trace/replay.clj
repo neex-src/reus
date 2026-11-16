@@ -357,21 +357,25 @@
           (shadow/write! sh path c)
           (stat! st :backup-applied))))))
 
-(defn replay!
-  "Replay main transcripts files into repo (a new one); maps {orig-root repo-dir}. Returns stats."
-  [files repo maps]
-  (let [evs (events files)
-        sh (shadow/create maps)
+(def ^:private record-kinds #{:prompt :tool :stop :subagent-start :subagent-stop})
+
+(defn run-events!
+  "Feed events evs (in time order) to trace.record, against a batch store for repo (a new one) and a
+  shadow of the projects (maps {orig-root repo-dir}). A tool event's evidence goes into the shadow by
+  (evidence sh st ev) on the disk as it was when the call started; an event of a kind trace.record does
+  not know (a backup, a check) goes to (side sh st ev). st is the stats atom both may count in. Returns
+  the stats."
+  [evs repo maps {:keys [evidence side]}]
+  (let [sh (shadow/create maps)
         _ (doseq [[wt branch] (distinct (worktree-adds evs))] (shadow/worktree! sh wt branch))
         _ (doseq [cwd (distinct (keep #(get-in % [:payload "cwd"]) evs))] (shadow/open! sh cwd))
         store (store/batch repo)
         x {:s store :d (shadow/disk sh repo)}
         st (atom {})]
     (try
-      (doseq [{:keys [kind ts start payload branch] :as ev} evs
-              :let [backup? (= kind :backup)]]
-        (if backup?
-          (backup! sh st ev)
+      (doseq [{:keys [kind ts start payload branch] :as ev} evs]
+        (if-not (record-kinds kind)
+          (side sh st ev)
         (let [cwd (get payload "cwd")
               f (when (= kind :tool) (let [f (file-of payload)] (when (and f (fs/absolute? f)) f)))
               sync! (fn [t] (when f (shadow/sync! sh f t branch))
@@ -380,7 +384,7 @@
           ;; commit the call made shows when the disk is then moved to the call's end
           (when (= kind :tool)
             (sync! (or start ts))
-            (evidence! sh st ev))
+            (evidence sh st ev))
           (when (and cwd (not (sync! ts))) (stat! st :no-repo))
           (store/at! store ts)
           (shadow/at! sh ts)
@@ -391,6 +395,11 @@
       (catch Throwable e (.destroy ^Process (:proc store)) (throw e))
       (finally (shadow/close! sh)))
     (merge @st {:head (shadow/stats sh)})))
+
+(defn replay!
+  "Replay main transcripts files into repo (a new one); maps {orig-root repo-dir}. Returns stats."
+  [files repo maps]
+  (run-events! (events files) repo maps {:evidence evidence! :side backup!}))
 
 (defn -main [& argv]
   (let [{:keys [sel repo maps force]}
