@@ -259,7 +259,14 @@
 .kind.k-write{background:#e6f4ea;color:#17803d}.kind.k-read{background:#e8f0fe;color:#1a4fb4}.kind.k-agent,.kind.k-handback{background:#f1e8fb;color:#6b3fa0}
 .kind.k-notice-agent,.kind.k-notice-task{background:#fdf3e1;color:#8a5a00}.kind.k-prompt{background:#1b1f24;color:#fff}.kind.k-brief{background:#f1e8fb;color:#6b3fa0}
 table.tr th{width:9rem;background:none;font:12px ui-monospace,Menlo,Consolas,monospace;color:#59636e;padding:2px 10px 2px 0;border:0}table.tr td{border:0;padding:2px 0;font:12px ui-monospace,Menlo,Consolas,monospace}table.tr{border:0;background:none;width:auto}
-.crumb a{color:#3b6fd4}")
+.crumb a{color:#3b6fd4}
+@media (max-width:700px){
+table.stack,table.stack tbody,table.stack tr,table.stack td{display:block;width:auto}
+table.stack thead{display:none}
+table.stack tr{border-bottom:1px solid #d5dae1;padding:6px 0}
+table.stack td{border:0;padding:1px 10px;text-align:left;white-space:normal}
+table.stack td.n{display:inline-block;padding-right:2px}
+table.stack td.n::before{content:attr(data-h) \" \";color:#59636e}}")
 
 (defn- top [prefix]
   [:header.top [:a.brand {:href (str prefix "index.html")} "A session as reus recorded it"]
@@ -369,18 +376,18 @@ table.tr th{width:9rem;background:none;font:12px ui-monospace,Menlo,Consolas,mon
               (thou (total-in (:agent-usage nums))) " tokens in and " (thou (:output_tokens (:agent-usage nums))) " out (their last answer is not in that), " (usd (:agent-cost nums)) " at list price."])
            [:p.muted "Calls in the session: " (str/join ", " (for [[t n] (sort-by (comp - val) (:tools nums))] (str n " " t))) "."]
            [:h2 "Prompts"]
-           [:table
+           [:table.stack
             [:thead [:tr [:th "#"] [:th "what it is"] [:th "text"] [:th.n "steps"] [:th.n "tokens out"] [:th.n "cost"]]]
             [:tbody (for [r ps]
                       [:tr [:td [:a {:href (str "p/" (:n r) ".html")} (:n r)]] [:td (kind-tag (:kind r))] [:td (clip (:title r) 110)]
-                       [:td.n (count (:work r))] [:td.n (if (:same-turn-as r) (str "same turn as " (:same-turn-as r)) (thou (:output_tokens (:usage r))))] [:td.n (usd (:cost r))]])]]
+                       [:td.n {:data-h "steps"} (count (:work r))] [:td.n {:data-h "tokens out"} (if (:same-turn-as r) (str "same turn as " (:same-turn-as r)) (thou (:output_tokens (:usage r))))] [:td.n {:data-h "cost"} (usd (:cost r))]])]]
            (when (seq as)
              (list [:h2 "Subagent runs"]
-                   [:table
+                   [:table.stack
                     [:thead [:tr [:th "run"] [:th "brief"] [:th.n "steps"] [:th.n "tokens out"] [:th.n "cost"]]]
                     [:tbody (for [r as]
                               [:tr [:td [:a {:href (str "a/" (:agent r) ".html")} (subs (:agent r) 0 (min 9 (count (:agent r))))]] [:td (clip (:title r) 110)]
-                               [:td.n (count (:work r))] [:td.n (thou (:output_tokens (:usage r)))] [:td.n (usd (:cost r))]])]]))
+                               [:td.n {:data-h "steps"} (count (:work r))] [:td.n {:data-h "tokens out"} (thou (:output_tokens (:usage r)))] [:td.n {:data-h "cost"} (usd (:cost r))]])]]))
            [:h2 "How to read it"]
            [:p "Every prompt, every tool call and every end of a turn is one commit on the session's branch in the trace repository; a subagent has a branch of its own, cut from the session when it starts. "
             "A commit's tree is the whole project right after the call, so the diff of a commit is what that call changed and a read changes nothing. "
