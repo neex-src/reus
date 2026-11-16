@@ -115,7 +115,9 @@
      :failed (count (filter step-failed? steps))
      :add (reduce + 0 (map :add steps)) :del (reduce + 0 (map :del steps))
      :secs (when (and (:t0 d) (:t1 d)) (- (:t1 d) (:t0 d)))
-     :turn (:turn-end d) :cost (cost (:turn-end d))}))
+     :turn (:turn-end d)
+     :cost (cost (cond-> (:turn-end d) ; a Claude end-of-turn note has no :model: the Model trailer of the prompt's calls has
+                   (nil? (:model (:turn-end d))) (assoc :model (some #(get-in % [:trailers "Model"]) steps))))}))
 
 (defn arm-data
   "One run of an arm: {:arm :project :sid8 :at :ids :prompts [{:d prompt-data :m metrics}] :total metrics-sum :tip :session}
