@@ -88,14 +88,18 @@
                    :requires ([trace.copilot-events])
                    :task (apply trace.copilot-events/-main *command-line-args*)}
 
+  copilot:replay {:doc "Old Copilot sessions into a NEW trace repo, with the files as they were at each call: bb copilot:replay [SESSION | events.jsonl | dir]... [--home DIR] [--repo DIR] [--map ORIG=DIR]... [--force]  (default var/copilot-replay; checked against Copilot's own file hashes)"
+                  :requires ([trace.copilot-replay])
+                  :task (apply trace.copilot-replay/-main *command-line-args*)}
+
   trace:test {:doc "Test the trace recorder"
               :requires ([clojure.test :as t] [trace.record-test])
               :task (let [{:keys [fail error]} (t/run-tests 'trace.record-test)]
                       (System/exit (if (zero? (+ fail error)) 0 1)))}
 
   test {:doc "Every test of this repo (the shell.js one needs node)"
-        :requires ([clojure.test :as t] [trace.record-test] [trace.hook-test] [trace.replay-test] [trace.probe-test] [trace.store-test] [trace.turn-test] [trace.ignore-test] [trace.gui-test] [trace.call-test] [trace.cost-test] [trace.fns-test] [trace.health-test] [trace.mirror-test] [trace.copilot-test] [trace.runs-test] [trace.runner-test] [trace.export-test] [jsonl.read-test])
-        :task (let [{:keys [fail error]} (t/run-tests 'trace.record-test 'trace.hook-test 'trace.replay-test 'trace.probe-test 'trace.store-test 'trace.turn-test 'trace.ignore-test 'trace.gui-test 'trace.call-test 'trace.cost-test 'trace.fns-test 'trace.health-test 'trace.mirror-test 'trace.copilot-test 'trace.runs-test 'trace.runner-test 'trace.export-test 'jsonl.read-test)
+        :requires ([clojure.test :as t] [trace.record-test] [trace.hook-test] [trace.replay-test] [trace.probe-test] [trace.store-test] [trace.turn-test] [trace.ignore-test] [trace.gui-test] [trace.call-test] [trace.cost-test] [trace.fns-test] [trace.health-test] [trace.mirror-test] [trace.copilot-test] [trace.runs-test] [trace.runner-test] [trace.export-test] [trace.copilot-replay-test] [jsonl.read-test])
+        :task (let [{:keys [fail error]} (t/run-tests 'trace.record-test 'trace.hook-test 'trace.replay-test 'trace.probe-test 'trace.store-test 'trace.turn-test 'trace.ignore-test 'trace.gui-test 'trace.call-test 'trace.cost-test 'trace.fns-test 'trace.health-test 'trace.mirror-test 'trace.copilot-test 'trace.runs-test 'trace.runner-test 'trace.export-test 'trace.copilot-replay-test 'jsonl.read-test)
                     js (:exit (shell {:continue true} "node test/trace/shell_test.js"))]
                 (System/exit (if (and (zero? (+ fail error)) (zero? js)) 0 1)))}
 
