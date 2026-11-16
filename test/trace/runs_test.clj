@@ -103,3 +103,8 @@
       (is (< (Math/abs (- 0.00438254 (runs/cost {:model "claude-haiku-5-5" :usage u}))) 1e-9))
       (is (< (Math/abs (- 0.00331499 (runs/cost {:model "claude-haiku-5-5" :usage (dissoc u :cache_1h_input_tokens)}))) 1e-9)
           "without the split a cache write is the 5-minute one"))))
+
+(deftest a-claude-turn-is-priced-by-the-model-of-its-calls
+  (let [d {:steps [{:kind :run :add 0 :del 0 :trailers {"Tool" "Bash" "Model" "claude-sonnet-5-5"}}]
+           :turn-end {:usage {:input_tokens 1000000 :output_tokens 0}}}]
+    (is (< (Math/abs (- 2.0 (:cost (runs/prompt-metrics d)))) 1e-9) "1M fresh input tokens at sonnet-5-5's list price")))
