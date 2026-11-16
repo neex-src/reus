@@ -89,14 +89,17 @@
 ;; --- the arms ------------------------------------------------------------------------------
 
 (defn parse-arm
-  "`[name=][ide:]model[:effort]` -> {:arm :model :effort :engine}; model `default` leaves the model to Copilot. With
-  the `ide:` prefix the arm runs through the engine of IntelliJ's Copilot plugin (trace.ide), not the CLI."
+  "`[name=][ide:|claude:]model[:effort]` -> {:arm :model :effort :engine}; model `default` leaves the model to Copilot. With
+  the `ide:` prefix the arm runs through the engine of IntelliJ's Copilot plugin (trace.ide), not the CLI; with `claude:` through
+  Claude Code (`claude -p`, model e.g. haiku or sonnet)."
   [s]
   (let [[_ nm rest*] (re-matches #"(?:([^=:]+)=)?(.+)" s)
         ide? (str/starts-with? rest* "ide:")
-        [model effort] (str/split (cond-> rest* ide? (subs 4)) #":" 2)]
-    (cond-> {:arm (slug (or nm (str (when ide? "ide-") model (when effort (str "-" effort))))) :model (when-not (= "default" model) model) :effort effort}
-      ide? (assoc :engine :ide))))
+        claude? (str/starts-with? rest* "claude:")
+        [model effort] (str/split (cond-> rest* ide? (subs 4) claude? (subs 7)) #":" 2)]
+    (cond-> {:arm (slug (or nm (str (when ide? "ide-") (when claude? "claude-") model (when effort (str "-" effort))))) :model (when-not (= "default" model) model) :effort effort}
+      ide? (assoc :engine :ide)
+      claude? (assoc :engine :claude))))
 
 (def ^:dynamic *copilot-bin* "Overrides $COPILOT_BIN (tests)." nil)
 
@@ -105,6 +108,28 @@
   []
   (let [bin (or *copilot-bin* (System/getenv "COPILOT_BIN") "copilot")]
     (if (str/ends-with? bin ".bb") ["bb" bin] [bin])))
+
+(def ^:dynamic *claude-bin* "Overrides $CLAUDE_BIN (tests)." nil)
+
+(defn claude-cmd
+  "The words that start Claude Code: $CLAUDE_BIN or `claude`; a .bb file goes through bb."
+  []
+  (let [bin (or *claude-bin* (System/getenv "CLAUDE_BIN") "claude")]
+    (if (str/ends-with? bin ".bb") ["bb" bin] [bin])))
+
+(defn arm-words
+  "The command words of prompt n (from 1) of an arm. Copilot: `-p PROMPT --allow-all-tools --session-id SID` for every prompt.
+  Claude Code (engine :claude): `-p PROMPT`, the first with `--session-id SID`, the others `--resume SID`, with
+  --dangerously-skip-permissions (the arm works in its own throwaway copy); recorded by the hooks in the Claude settings
+  (bb trace:on), whose trace is the one in the env the arm gets."
+  [{:keys [model effort engine]} prompt sid n own-hooks?]
+  (if (= :claude engine)
+    (concat (claude-cmd) ["-p" prompt (if (= 1 n) "--session-id" "--resume") sid "--dangerously-skip-permissions"]
+            (when model ["--model" model]) (when effort ["--effort" effort]))
+    (concat (copilot-cmd) ["-p" prompt "--allow-all-tools" "--session-id" sid]
+            (when own-hooks? ["--trust-folder"])
+            (when model ["--model" model])
+            (when effort ["--reasoning-effort" effort]))))
 
 (defn copilot-home [] (or (System/getenv "COPILOT_HOME") (str (fs/path (fs/home) ".copilot"))))
 
@@ -119,14 +144,14 @@
 
 (defn run-arm!
   "Run the task's prompts as one session in a fresh copy; calls (say line) with progress. {:arm :dir :session :ok? :prompts n :ms}."
-  [task {:keys [arm model effort engine]} say]
+  [task {:keys [arm model effort engine] :as arm*} say]
   (let [ide? (= :ide engine)
         tdir (task-dir task)
         spec (edn/read-string (slurp (str (fs/path tdir "task.edn"))))
         dir (var-dir "runs-work" (str task "--" arm))
         logs (var-dir "runs-work" "logs")
         sid (str (java.util.UUID/randomUUID))
-        own-hooks? (and (not ide?) (not (hooks-installed?)))]
+        own-hooks? (and (not ide?) (not= :claude engine) (not (hooks-installed?)))]
     (fs/delete-tree dir)
     (fs/create-dirs logs)
     (fs/copy-tree (fs/path tdir "start") dir)
@@ -149,11 +174,7 @@
                 r (apply p/shell {:dir dir :continue true :out (str (fs/path logs (format "%s--%s-%02d.log" task arm n))) :err :out
                                   :extra-env {"REUS_HOME" g/home "TRACE_REPO" (str g/*repo*)}}
                          (concat (when (fs/which "timeout") ["timeout" "1200"])
-                                 (copilot-cmd)
-                                 ["-p" prompt "--allow-all-tools" "--session-id" sid]
-                                 (when own-hooks? ["--trust-folder"])
-                                 (when model ["--model" model])
-                                 (when effort ["--reasoning-effort" effort])))]
+                                 (arm-words arm* prompt sid n own-hooks?)))]
             (say (format "%s: prompt %d/%d exit %d, %.0fs" arm n (count (:prompts spec)) (:exit r) (/ (- (System/currentTimeMillis) t0) 1000.0)))
             (if (zero? (:exit r))
               (recur more (inc n))
