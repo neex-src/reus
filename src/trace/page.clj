@@ -106,17 +106,18 @@ ul.plain{margin:.3em 0;padding-left:1.3em}ul.plain li{margin:.2em 0;overflow-wra
 .filters{display:flex;flex-wrap:wrap;gap:6px 16px;margin:12px 0}.filters b{border-bottom:2px solid #1b1f24}")
 
 (defn shell
-  "A whole page: title, the top bar (current: which link is lit, :prompts :mirrors :calls :runs), body. wide: more
-  room for tables."
-  [title body & {:keys [current wide]}]
+  "A whole page: title, the top bar (current: which link is lit, :prompts :mirrors :calls :runs; top: hiccup that
+  replaces the whole top bar, for pages that are files and have no server to link to), body. wide: more room for tables."
+  [title body & {:keys [current wide top extra-css]}]
   (str "<!doctype html>"
        (h/html
         [:html {:lang "en"}
          [:head [:meta {:charset "utf-8"}] [:meta {:name "viewport" :content "width=device-width, initial-scale=1"}]
-          [:title title] [:style (h/raw css)]]
+          [:title title] [:style (h/raw (str css extra-css))]]
          [:body
-          [:header.top
-           [:a.brand {:href "/"} "reus trace"]
-           (for [[k href t] [[:prompts "/" "Prompts"] [:mirrors "/mirrors" "Mirrors"] [:calls "/calls" "Model calls"] [:runs "/runs" "Runs"]]]
-             [:a (cond-> {:href href} (= k current) (assoc :class "on")) t])]
+          (or top
+              [:header.top
+               [:a.brand {:href "/"} "reus trace"]
+               (for [[k href t] [[:prompts "/" "Prompts"] [:mirrors "/mirrors" "Mirrors"] [:calls "/calls" "Model calls"] [:runs "/runs" "Runs"]]]
+                 [:a (cond-> {:href href} (= k current) (assoc :class "on")) t])])
           [:main (when wide {:class "wide"}) body]]])))

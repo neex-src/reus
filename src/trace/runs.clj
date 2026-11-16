@@ -224,6 +224,26 @@ a.toggle { font-size: 12px; margin-left: 6px; }
 body { margin: 0; background: var(--bg); color: var(--fg); font: 15px/1.45 system-ui, -apple-system, 'Segoe UI', sans-serif; }
 code { font-family: var(--mono); font-size: 0.92em; }
 summary { cursor: pointer; }
+@media (max-width: 700px) {
+  table.arms, table.arms tbody, table.arms tr, table.arms td { display: block; width: auto; }
+  table.arms thead { display: none; }
+  table.arms tr { border-bottom: 1px solid var(--line); padding: 6px 0; }
+  table.arms td { border: 0; padding: 1px 10px; text-align: left; white-space: normal; }
+  table.arms td:not(:first-child) { display: inline-block; padding-right: 2px; }
+  table.arms:not(.delta) td:nth-child(3)::before { content: 'calls '; } table.arms:not(.delta) td:nth-child(4)::before { content: 'edits '; }
+  table.arms:not(.delta) td:nth-child(5)::before { content: 'failed '; } table.arms:not(.delta) td:nth-child(6)::before { content: 'lines '; }
+  table.arms:not(.delta) td:nth-child(7)::before { content: 'time '; } table.arms:not(.delta) td:nth-child(8)::before { content: 'in '; }
+  table.arms:not(.delta) td:nth-child(9)::before { content: 'out '; } table.arms:not(.delta) td:nth-child(10)::before { content: 'thinking '; }
+  table.arms:not(.delta) td:nth-child(11)::before { content: 'cache read '; } table.arms:not(.delta) td:nth-child(12)::before { content: 'cost '; }
+  table.arms.delta td:nth-child(2)::before { content: 'calls '; } table.arms.delta td:nth-child(3)::before { content: 'edits '; }
+  table.arms.delta td:nth-child(4)::before { content: 'failed '; } table.arms.delta td:nth-child(5)::before { content: 'added '; }
+  table.arms.delta td:nth-child(6)::before { content: 'removed '; } table.arms.delta td:nth-child(7)::before { content: 'time '; }
+  table.arms.delta td:nth-child(8)::before { content: 'in '; } table.arms.delta td:nth-child(9)::before { content: 'out '; }
+  table.arms.delta td:nth-child(10)::before { content: 'thinking '; } table.arms.delta td:nth-child(11)::before { content: 'cache read '; }
+  table.arms.delta td:nth-child(12)::before { content: 'cost '; }
+  table.arms td::before { color: var(--muted); }
+  .cols { grid-template-columns: minmax(0, 1fr); }
+}
 ")
 
 (def ^:private toggle-script
