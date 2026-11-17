@@ -377,17 +377,18 @@
             (map :pre plan) (remove vector? (map :fill plan)) (map :check plan))))
 
 (defn events
-  "Every event of the given logs, in time order."
-  [files]
+  "Every event of the given logs, in time order; (on-file f) as each one is read."
+  [files & [{:keys [on-file]}]]
   (->> files
-       (mapcat session-events)
+       (mapcat #(do (when on-file (on-file %)) (session-events %)))
        (filter :ts)
        (sort-by (juxt :ts #(order (:kind %)) :file :line))))
 
 (defn replay!
-  "Replay Copilot logs files into repo (a new one); maps {orig-root repo-dir}. Returns stats."
-  [files repo maps]
-  (rp/run-events! (events files) repo maps {:evidence evidence! :side side!}))
+  "Replay Copilot logs files into repo (a new one); maps {orig-root repo-dir}; opts :on-file, :progress (as
+  trace.replay/replay!). Returns stats."
+  [files repo maps & [opts]]
+  (rp/run-events! (events files opts) repo maps {:evidence evidence! :side side! :progress (:progress opts)}))
 
 ;; --- command line --------------------------------------------------------------------------
 
