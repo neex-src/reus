@@ -9,7 +9,8 @@
                                  of THIS checkout (paths baked in; the command does nothing when the checkout is gone)
     skills/reus-compare/SKILL.md the guided flow (skills/reus-compare/SKILL.md of the checkout, with its path filled in);
                                  started in Copilot with /reus-compare
-  Nothing else is touched, nothing is downloaded, no MCP server is added. Run it again after moving the checkout."
+  Nothing else is touched, nothing is downloaded, no MCP server is added. Run it again after moving the checkout.
+  (status) and (plan :install|:uninstall) are what bb gui shows: what is in place, what a click would write or delete."
   (:require [babashka.fs :as fs]
             [cheshire.core :as json]
             [clojure.string :as str]
@@ -39,6 +40,27 @@
   (str/replace (slurp (str (fs/path g/home "skills" "reus-compare" "SKILL.md"))) "{{REUS}}" (str g/home)))
 
 (defn home [] (or (System/getenv "COPILOT_HOME") (str (fs/path (fs/home) ".copilot"))))
+
+(defn- files-of [h] {:hooks (str (fs/path h "hooks" "reus.json")) :skill (str (fs/path h "skills" "reus-compare" "SKILL.md"))})
+
+(defn status
+  "{:home :exists? :file :on? :checkouts #{dirs the hook commands run} :skill?} of the Copilot home."
+  [& [home*]]
+  (let [h (or home* (home))
+        {:keys [hooks skill]} (files-of h)
+        cmds (try (for [[_ hs] (get (json/parse-string (slurp hooks)) "hooks") e hs] (get e "bash")) (catch Throwable _ nil))]
+    {:home h :exists? (fs/exists? h) :file hooks :on? (fs/exists? hooks)
+     :checkouts (set (keep #(some->> (re-find #"--config '([^']+)/bb\.edn'" (str %)) second) cmds))
+     :skill? (fs/exists? skill)}))
+
+(defn plan
+  "What install! or uninstall! would do in home: {:writes [[file text]] :deletes [file-or-dir]}."
+  [what & [home*]]
+  (let [h (or home* (home))
+        {:keys [hooks skill]} (files-of h)]
+    (if (= what :install)
+      {:writes [[hooks (str (hooks-json) "\n")] [skill (skill-text)]] :deletes []}
+      {:writes [] :deletes (filterv fs/exists? [hooks (str (fs/parent skill))])})))
 
 (defn install!
   "Write the hook file and the skill into home (default: the Copilot home)."

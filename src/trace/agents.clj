@@ -12,10 +12,11 @@
   (:require [babashka.fs :as fs]
             [cheshire.core :as json]
             [clojure.java.io :as io]
-            [clojure.string :as str])
+            [clojure.string :as str]
+            [jsonl.read :as jr])
   (:import [java.time Duration Instant]))
 
-(def ^:private projects-dir (str (fs/path (fs/home) ".claude" "projects")))
+(def ^:private projects-dir jr/projects-dir)
 
 (defn agent-id [output]
   (second (or (re-find #"\"agentId\"\s*:\s*\"([A-Za-z0-9]+)\"" (str output))

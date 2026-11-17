@@ -1,7 +1,7 @@
 (ns jsonl.read
   "Claude Code session transcripts as data.
 
-  Claude Code writes one jsonl file per session: ~/.claude/projects/<dir>/<session>.jsonl,
+  Claude Code writes one jsonl file per session: ~/.claude/projects/<dir>/<session>.jsonl ($CLAUDE_CONFIG_DIR/projects),
   where <dir> is the session's cwd with / turned into -. A subagent's run goes to
   <dir>/<session>/subagents/agent-<id>.jsonl. Every line is one entry:
     user        a prompt, or tool results (content blocks of type tool_result)
@@ -22,7 +22,10 @@
             [clojure.string :as str])
   (:import [java.time Duration Instant]))
 
-(def projects-dir (str (fs/path (fs/home) ".claude" "projects")))
+(def claude-dir "Claude Code's own dir: $CLAUDE_CONFIG_DIR, else ~/.claude."
+  (str (or (System/getenv "CLAUDE_CONFIG_DIR") (fs/path (fs/home) ".claude"))))
+
+(def projects-dir (str (fs/path claude-dir "projects")))
 
 (def ^:dynamic *result-max*
   "Characters of a tool result kept in :result (:result-chars has the full size)."

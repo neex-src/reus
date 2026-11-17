@@ -34,6 +34,8 @@ code, pre, .mono { font-family: var(--mono); }
 .top { position: sticky; top: 0; z-index: 5; display: flex; align-items: center; gap: 20px; flex-wrap: wrap;
   padding: 10px 20px; background: var(--panel); border-bottom: 1px solid var(--line); }
 .brand { font-weight: 700; font-size: 17px; text-decoration: none; letter-spacing: -.01em; }
+.dash { text-decoration: none; font-size: 13px; padding: 4px 10px; border-radius: 6px; color: var(--muted); background: var(--sunk); }
+.dash:hover { color: var(--ink); }
 .repo { color: var(--muted); font: 12px var(--mono); }
 .top nav { display: flex; gap: 4px; }
 .top nav a { text-decoration: none; padding: 4px 10px; border-radius: 6px; color: var(--muted); }

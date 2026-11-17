@@ -124,7 +124,7 @@
                {:branch (get e "gitBranch") :result r :start (:start u)
                 :turn (turn/tool ix (get u "id") {})})))))
 
-(def ^:dynamic *history-dir* "Where Claude Code keeps file backups." (str (fs/path (fs/home) ".claude" "file-history")))
+(def ^:dynamic *history-dir* "Where Claude Code keeps file backups." (str (fs/path jr/claude-dir "file-history")))
 
 (defn backup-events
   "A file's content as Claude Code backed it up before an edit (file-history-snapshot entries,
@@ -239,10 +239,10 @@
 (def ^:private order {:backup -1 :prompt 0 :subagent-start 1 :tool 2 :subagent-stop 3 :stop 4})
 
 (defn events
-  "Every event of the given main transcripts and their agents, in time order."
-  [files]
+  "Every event of the given main transcripts and their agents, in time order; (on-file f) as each one is read."
+  [files & [{:keys [on-file]}]]
   (->> files
-       (mapcat #(concat (session-events %) (agent-events %)))
+       (mapcat #(do (when on-file (on-file %)) (concat (session-events %) (agent-events %))))
        (filter :ts)
        (sort-by (juxt :ts #(order (:kind %)) :file :line))))
 
@@ -363,17 +363,20 @@
   "Feed events evs (in time order) to trace.record, against a batch store for repo (a new one) and a
   shadow of the projects (maps {orig-root repo-dir}). A tool event's evidence goes into the shadow by
   (evidence sh st ev) on the disk as it was when the call started; an event of a kind trace.record does
-  not know (a backup, a check) goes to (side sh st ev). st is the stats atom both may count in. Returns
-  the stats."
-  [evs repo maps {:keys [evidence side]}]
+  not know (a backup, a check) goes to (side sh st ev). st is the stats atom both may count in. (progress i n)
+  after each event, when given. Returns the stats."
+  [evs repo maps {:keys [evidence side progress]}]
   (let [sh (shadow/create maps)
         _ (doseq [[wt branch] (distinct (worktree-adds evs))] (shadow/worktree! sh wt branch))
         _ (doseq [cwd (distinct (keep #(get-in % [:payload "cwd"]) evs))] (shadow/open! sh cwd))
         store (store/batch repo)
         x {:s store :d (shadow/disk sh repo)}
-        st (atom {})]
+        st (atom {})
+        n (count evs)
+        done (atom 0)]
     (try
       (doseq [{:keys [kind ts start payload branch] :as ev} evs]
+        (when progress (progress (swap! done inc) n))
         (if-not (record-kinds kind)
           (side sh st ev)
         (let [cwd (get payload "cwd")
@@ -397,9 +400,10 @@
     (merge @st {:head (shadow/stats sh)})))
 
 (defn replay!
-  "Replay main transcripts files into repo (a new one); maps {orig-root repo-dir}. Returns stats."
-  [files repo maps]
-  (run-events! (events files) repo maps {:evidence evidence! :side backup!}))
+  "Replay main transcripts files into repo (a new one); maps {orig-root repo-dir}; opts :on-file, :progress
+  (see events, run-events!). Returns stats."
+  [files repo maps & [opts]]
+  (run-events! (events files opts) repo maps {:evidence evidence! :side backup! :progress (:progress opts)}))
 
 (defn -main [& argv]
   (let [{:keys [sel repo maps force]}
