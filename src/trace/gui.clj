@@ -3,6 +3,8 @@
   repo written by hooks/trace.bb.
 
   bb trace:gui [repo] [port]    central repo on :7360, any other on :7357
+  bb gui (trace.dash) serves every trace repo of the checkout through serve!, each on its own port, with a
+  link back to the dashboard in the top bar.
 
   Bench repo: prompt NN of every main (lame, sane, ...) side by side. Central repo:
   one project at a time (the picker in the top bar), newest prompt first.
@@ -39,6 +41,10 @@
   (:import [java.net URLDecoder URLEncoder]
            [java.time Instant ZoneId]
            [java.time.format DateTimeFormatter]))
+
+(def ^:dynamic *dash*
+  "The dashboard's URL when bb gui serves this viewer (the top bar links it), else nil."
+  nil)
 
 (defn- newest-session
   "The project whose session branch has the newest tip commit."
@@ -306,6 +312,7 @@
 
 (defn- topbar [tips current ms]
   [:header.top
+   (when *dash* [:a.dash {:href *dash*} "← dashboard"])
    [:a.brand {:href "/"} "reus trace"]
    [:span.repo g/*repo*]
    (when (central?)
@@ -640,6 +647,15 @@
         (binding [*out* *err*] (println uri (ex-message e)))
         {:status 500 :headers {"content-type" "text/plain"} :body (str "error: " (ex-message e))}))))
 
+(defn serve!
+  "Serve trace repo on 127.0.0.1:port ($TRACE_GUI_IP for another address), every request with g/*repo* bound
+  to it, so one process can serve several repos; dash: the dashboard's URL for the top bar. Returns the
+  stop fn (http-kit's)."
+  [repo port & {:keys [dash]}]
+  (let [repo (str (fs/canonicalize repo))]
+    (srv/run-server (fn [req] (binding [g/*repo* repo *dash* dash] (handler req)))
+                    {:ip (or (System/getenv "TRACE_GUI_IP") "127.0.0.1") :port port})))
+
 (defn -main
   "bb trace:gui [repo] [port]: serve a trace repo (default the central one) on 127.0.0.1."
   [& [repo port]]
@@ -647,6 +663,6 @@
         port (parse-long (or port (if (= repo (str (fs/canonicalize g/default-repo))) "7360" "7357")))]
     (alter-var-root #'g/*repo* (constantly repo))
     (mirror/warm!)
-    (srv/run-server #'handler {:ip (or (System/getenv "TRACE_GUI_IP") "127.0.0.1") :port port})
+    (serve! repo port)
     (println (str "trace view of " repo " on http://127.0.0.1:" port "/"))
     @(promise)))

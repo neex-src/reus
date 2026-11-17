@@ -241,10 +241,20 @@
       (or (get @cache [b nn tip])
           (let [d (prompt-data* main nn tip b)] (swap! cache assoc [b nn tip] d) d)))))
 
+(def ^:private central-cache (atom {}))
+
 (defn central?
-  "A trace.record repo (live: it keeps session state), as opposed to a bench trace.bb repo."
+  "A trace.record repo (live: it keeps session state; a replay: session branches <project>/s/<session>), as
+  opposed to a bench trace.bb repo. The branch check is cached for a few seconds per repo."
   []
-  (fs/exists? (fs/path g/*repo* ".git" "trace-sessions")))
+  (or (fs/exists? (fs/path g/*repo* ".git" "trace-sessions"))
+      (let [now (System/currentTimeMillis)
+            [t v] (get @central-cache g/*repo*)]
+        (if (and t (< (- now t) 5000))
+          v
+          (let [v (not (str/blank? (git "for-each-ref" "--count=1" "--format=%(refname)" "refs/heads/*/s/*")))]
+            (swap! central-cache assoc g/*repo* [now v])
+            v)))))
 
 (def live-window-ms
   "A prompt open in its state but with no event for this long is not running: its session died
