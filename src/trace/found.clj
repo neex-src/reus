@@ -102,7 +102,8 @@
         st (fs/path home "session-state")
         ss (if (fs/directory? st)
              (->> (fs/list-dir st)
-                  (filter fs/directory?)
+                  (filter #(and (fs/directory? %) (not (str/starts-with? (str (fs/file-name %)) "."))
+                                (or (fs/exists? (fs/path % "workspace.yaml")) (fs/exists? (fs/path % "events.jsonl")))))
                   (map (fn [d]
                          (let [w (cr/workspace d)
                                log (fs/path d "events.jsonl")

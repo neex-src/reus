@@ -132,7 +132,7 @@
     (testing "the page"
       (let [r (get* "/")]
         (is (= 200 (:status r)))
-        (is (str/includes? (:body r) "Found 2 Claude sessions in 2 projects, 2 Copilot sessions. Hooks: Claude not installed, Copilot not installed. Recorded so far: nothing."))
+        (is (str/includes? (:body r) "Found 2 Claude sessions in 2 projects, 2 Copilot sessions. Hooks: Claude not installed, Copilot not installed. Live trace: none yet."))
         (is (str/includes? (:body r) "content=\"tok-0\"") "the token is in the page")
         (is (str/includes? (:body r) "Seven hook entries"))
         (is (= 403 (:status (get* "/" :host "evil.example:7350"))) "another Host (DNS rebinding) gets nothing")))

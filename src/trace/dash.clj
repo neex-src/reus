@@ -218,12 +218,16 @@
 
 (defn- found-line
   "The one sentence of what was found."
-  [c cp hk live]
-  (str "Found " (plural (:sessions c) "Claude session" "Claude sessions") " in " (plural (count (:projects c)) "project" "projects")
-       ", " (plural (count (:sessions cp)) "Copilot session" "Copilot sessions")
-       ". Hooks: Claude " (if (get-in hk [:claude :on?]) "on" "not installed")
-       ", Copilot " (if (get-in hk [:copilot :on?]) "on" "not installed")
-       ". Recorded so far: " (if (:absent? live) "nothing" (plural (:sessions live) "session" "sessions")) "."))
+  [c cp hk repos]
+  (let [live (:live repos)
+        built (reduce + (keep #(:sessions (get repos %)) [:claude-replay :copilot-replay]))]
+    (str "Found " (plural (:sessions c) "Claude session" "Claude sessions") " in " (plural (count (:projects c)) "project" "projects")
+         ", " (plural (count (:sessions cp)) "Copilot session" "Copilot sessions")
+         ". Hooks: Claude " (if (get-in hk [:claude :on?]) "on" "not installed")
+         ", Copilot " (if (get-in hk [:copilot :on?]) "on" "not installed")
+         ". Live trace: " (if (:absent? live) "none yet" (plural (:sessions live) "session" "sessions"))
+         (when (pos? built) (str "; built from old logs: " (plural built "session" "sessions")))
+         ".")))
 
 (defn- cards [c cp hk live]
   [:section.cards
@@ -472,7 +476,7 @@
               :else (pill "bad" (plural (count health) "problem" "problems")))]
        (if (seq health)
          [:ul.problems (for [[label _ reason] health] [:li [:b label] ": " reason])]
-         [:p.sub (if (nil? health) "Nothing is recorded live yet (the hooks are off)." "The hooks ran, the worker kept up, nothing failed.")])
+         [:p.sub (if (nil? health) (list "No live trace repo here yet (" [:code (tilde g/*repo*)] ").") "The hooks ran, the worker kept up, nothing failed.")])
        [:p.sub "Same as " [:code "bb trace:health"] " in a terminal."]
        (when-not (:absent? live)
          [:p.links
@@ -492,7 +496,7 @@
             [:header.top
              [:div.brand "reus" [:span " records what AI coding agents do, as git history"]]
              [:div.where "running from " [:code (tilde g/home)]]]
-            [:p.found (found-line c cp hk live)
+            [:p.found (found-line c cp hk repos)
              [:span.ro " Nothing has been changed: this page only looks until you press a button."]
              " " [:a.again {:href "/"} "look again"]]
             (cards c cp hk live)
