@@ -615,16 +615,20 @@
 (defn- reus-there? [port]
   (try (= "reus gui" (slurp (str "http://127.0.0.1:" port "/x/ping"))) (catch Exception _ false)))
 
+(defn browser-command
+  "The command that opens url: browser (a shell command, the url appended: $BROWSER), else `open` (macOS) or
+  `xdg-open`; nil when there is none."
+  [url browser]
+  (cond (not (str/blank? browser)) ["sh" "-c" (str browser " \"$1\"") "sh" url]
+        (fs/which "open") ["open" url]
+        (fs/which "xdg-open") ["xdg-open" url]))
+
 (defn open-browser!
-  "Open url in the browser: $BROWSER (a command, the url appended), else `open` (macOS) or `xdg-open`."
+  "Open url in the browser (browser-command with $BROWSER); false when it could not."
   [url]
-  (let [b (System/getenv "BROWSER")
-        cmd (cond (not (str/blank? b)) ["sh" "-c" (str b " \"$1\"") "sh" url]
-                  (fs/which "open") ["open" url]
-                  (fs/which "xdg-open") ["xdg-open" url])]
-    (if cmd
-      (try (p/process {:out :discard :err :discard} cmd) true (catch Exception _ false))
-      false)))
+  (if-let [cmd (browser-command url (System/getenv "BROWSER"))]
+    (try (apply p/process {:out :discard :err :discard} cmd) true (catch Exception _ false))
+    false))
 
 (defn -main [& argv]
   (let [opts (loop [[a b & more :as as] argv o {}]

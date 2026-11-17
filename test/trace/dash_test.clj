@@ -204,6 +204,11 @@
             (doseq [{:keys [stop]} (vals (:viewers @@#'dash/state))] (stop))
             (swap! @#'dash/state assoc :viewers {})))))))
 
+(deftest the-browser-is-opened-with-the-url
+  (is (= "http://127.0.0.1:7350/\n" (:out @(apply p/process {:out :string} (dash/browser-command "http://127.0.0.1:7350/" "echo"))))
+      "$BROWSER is a command, the url goes after it")
+  (is (= "--app x\n" (:out @(apply p/process {:out :string} (dash/browser-command "x" "echo --app")))) "with its own arguments"))
+
 (deftest hooks-on-and-off
   (machine!)
   (let [before (json/parse-string (slurp settings))]
