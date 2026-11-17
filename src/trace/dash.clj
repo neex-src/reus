@@ -225,7 +225,7 @@
          ", " (plural (count (:sessions cp)) "Copilot session" "Copilot sessions")
          ". Hooks: Claude " (if (get-in hk [:claude :on?]) "on" "not installed")
          ", Copilot " (if (get-in hk [:copilot :on?]) "on" "not installed")
-         ". Live trace: " (if (:absent? live) "none yet" (plural (:sessions live) "session" "sessions"))
+         ". Live trace: " (if (pos? (or (:sessions live) 0)) (plural (:sessions live) "session" "sessions") "none yet")
          (when (pos? built) (str "; built from old logs: " (plural built "session" "sessions")))
          ".")))
 
