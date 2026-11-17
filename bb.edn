@@ -2,6 +2,10 @@
  :tasks
  {:requires ([babashka.fs :as fs])
 
+  gui {:doc "The way in: a dashboard on http://127.0.0.1:7350 (opens the browser). Shows what is on this machine, builds traces from old Claude and Copilot logs, turns the hooks on and off, links every trace repo to the viewer: bb gui [--port N] [--no-open]"
+       :requires ([trace.dash])
+       :task (apply trace.dash/-main *command-line-args*)}
+
   trace:gui {:doc "Browse a trace repo: bb trace:gui [repo] [port]  (central repo on :7360)"
              :requires ([trace.gui])
              :task (apply trace.gui/-main *command-line-args*)}
@@ -98,8 +102,8 @@
                       (System/exit (if (zero? (+ fail error)) 0 1)))}
 
   test {:doc "Every test of this repo (the shell.js one needs node)"
-        :requires ([clojure.test :as t] [trace.record-test] [trace.hook-test] [trace.replay-test] [trace.probe-test] [trace.store-test] [trace.turn-test] [trace.ignore-test] [trace.gui-test] [trace.call-test] [trace.cost-test] [trace.fns-test] [trace.health-test] [trace.mirror-test] [trace.copilot-test] [trace.runs-test] [trace.runner-test] [trace.export-test] [trace.copilot-replay-test] [jsonl.read-test])
-        :task (let [{:keys [fail error]} (t/run-tests 'trace.record-test 'trace.hook-test 'trace.replay-test 'trace.probe-test 'trace.store-test 'trace.turn-test 'trace.ignore-test 'trace.gui-test 'trace.call-test 'trace.cost-test 'trace.fns-test 'trace.health-test 'trace.mirror-test 'trace.copilot-test 'trace.runs-test 'trace.runner-test 'trace.export-test 'trace.copilot-replay-test 'jsonl.read-test)
+        :requires ([clojure.test :as t] [trace.record-test] [trace.hook-test] [trace.replay-test] [trace.probe-test] [trace.store-test] [trace.turn-test] [trace.ignore-test] [trace.gui-test] [trace.call-test] [trace.cost-test] [trace.fns-test] [trace.health-test] [trace.mirror-test] [trace.copilot-test] [trace.runs-test] [trace.runner-test] [trace.export-test] [trace.copilot-replay-test] [trace.dash-test] [jsonl.read-test])
+        :task (let [{:keys [fail error]} (t/run-tests 'trace.record-test 'trace.hook-test 'trace.replay-test 'trace.probe-test 'trace.store-test 'trace.turn-test 'trace.ignore-test 'trace.gui-test 'trace.call-test 'trace.cost-test 'trace.fns-test 'trace.health-test 'trace.mirror-test 'trace.copilot-test 'trace.runs-test 'trace.runner-test 'trace.export-test 'trace.copilot-replay-test 'trace.dash-test 'jsonl.read-test)
                     js (:exit (shell {:continue true} "node test/trace/shell_test.js"))]
                 (System/exit (if (and (zero? (+ fail error)) (zero? js)) 0 1)))}
 
