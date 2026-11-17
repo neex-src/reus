@@ -157,6 +157,7 @@
               :stats (select-keys stats [:prompt :tool :stop :subagent-start :post])))
       (catch Throwable e
         (binding [*out* *err*] (println "build" (name source) "failed:" (ex-message e)))
+        (try (fs/delete-tree tmp) (catch Throwable _))
         (job! assoc :state "failed" :ended (System/currentTimeMillis) :error (or (ex-message e) (str e))))))
   (job))
 
@@ -620,7 +621,7 @@
   `xdg-open`; nil when there is none."
   [url browser]
   (cond (not (str/blank? browser)) ["sh" "-c" (str browser " \"$1\"") "sh" url]
-        (fs/which "open") ["open" url]
+        (str/includes? (str/lower-case (System/getProperty "os.name" "")) "mac") ["open" url]
         (fs/which "xdg-open") ["xdg-open" url]))
 
 (defn open-browser!
