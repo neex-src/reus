@@ -1,5 +1,7 @@
 # reus
 
+All the code here is written by AI (Claude Code) and has not been reviewed.
+
 reus records what an AI coding agent does, as git history. Every prompt, every tool call (a file
 read, an edit, a command) and every answer becomes one commit in a separate git repo. Later you go
 through a session step by step with plain `git log -p`, or in the browser.
@@ -11,7 +13,7 @@ It works with Claude Code and with GitHub Copilot (the CLI and the IntelliJ plug
 - git
 - bb ([babashka](https://babashka.org)): `brew install borkdude/brew/babashka`
 
-Nothing else. reus installs nothing.
+reus installs nothing.
 
 ## Start
 
