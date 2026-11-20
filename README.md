@@ -11,7 +11,7 @@ It works with Claude Code and with GitHub Copilot (the CLI and the IntelliJ plug
 ## What you need
 
 - git
-- bb ([babashka](https://babashka.org)): `brew install borkdude/brew/babashka`
+- bb ([babashka](https://babashka.org))
 
 reus installs nothing.
 
